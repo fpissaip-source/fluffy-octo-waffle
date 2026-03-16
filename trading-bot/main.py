@@ -117,6 +117,9 @@ def main():
                 print("  Trage TELEGRAM_TOKEN und TELEGRAM_CHAT_ID in .env ein.")
                 print("  Siehe README fuer Anleitung.\n")
                 sys.exit(1)
+            import threading
+            t = threading.Thread(target=engine.run, daemon=True, name="engine")
+            t.start()
             from telegram_bot import TradingTelegramBot
             bot = TradingTelegramBot()
             bot.run()
