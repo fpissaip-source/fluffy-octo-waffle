@@ -1060,7 +1060,7 @@ class Config:
     TELEGRAM_TOKEN: str = os.getenv("TELEGRAM_TOKEN", "")
     TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
 
-    ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
+    OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
 
     DATABASE_URL: str = os.getenv("DATABASE_URL", "")
 
@@ -2031,9 +2031,9 @@ class KeywordScorer:
         }
 
 
-class ClaudeAnalyzer:
+class OpenAIAnalyzer:
     def __init__(self):
-        self.api_key = Config.ANTHROPIC_API_KEY
+        self.api_key = Config.OPENAI_API_KEY
         self.available = bool(self.api_key)
         self.last_call = 0
         self.min_interval = 60
@@ -2045,39 +2045,29 @@ class ClaudeAnalyzer:
         if now - self.last_call < self.min_interval:
             return None
         try:
-            import requests
+            from openai import OpenAI
             import json
+            client = OpenAI(api_key=self.api_key)
             news_text = "\n".join(f"- {h}" for h in headlines[:10])
-            response = requests.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={
-                    "x-api-key": self.api_key,
-                    "content-type": "application/json",
-                    "anthropic-version": "2023-06-01",
-                },
-                json={
-                    "model": "claude-sonnet-4-20250514",
-                    "max_tokens": 300,
-                    "messages": [{"role": "user", "content": (
-                        f"Analyze these headlines for {symbol} stock sentiment.\n\n"
-                        f"{news_text}\n\n"
-                        f"Respond ONLY with JSON:\n"
-                        f'{{"score": <-1.0 to 1.0>, "confidence": <0 to 1>, '
-                        f'"reason": "<one sentence>"}}'
-                    )}],
-                },
-                timeout=15,
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                max_tokens=300,
+                messages=[{"role": "user", "content": (
+                    f"Analyze these headlines for {symbol} stock sentiment.\n\n"
+                    f"{news_text}\n\n"
+                    f"Respond ONLY with JSON:\n"
+                    f'{{"score": <-1.0 to 1.0>, "confidence": <0 to 1>, '
+                    f'"reason": "<one sentence>"}}'
+                )}],
             )
             self.last_call = time.time()
-            if response.status_code == 200:
-                data = response.json()
-                text = data["content"][0]["text"]
-                match = re.search(r'\{[^}]+\}', text)
-                if match:
-                    return json.loads(match.group())
+            text = response.choices[0].message.content or ""
+            match = re.search(r'\{[^}]+\}', text)
+            if match:
+                return json.loads(match.group())
             return None
         except Exception as e:
-            logger.warning(f"Claude analysis failed: {e}")
+            logger.warning(f"OpenAI analysis failed: {e}")
             return None
 
 
@@ -2085,7 +2075,7 @@ class SentimentEngine:
     def __init__(self, broker):
         self.news_fetcher = NewsFetcher(broker)
         self.scorer = KeywordScorer()
-        self.claude = ClaudeAnalyzer()
+        self.openai = OpenAIAnalyzer()
         self._cache: dict = {}
         self._cache_ttl = 300
 
@@ -2110,14 +2100,14 @@ class SentimentEngine:
         macro_articles = self.news_fetcher.get_market_news(limit=10)
         macro_sentiment = self.scorer.score_articles(macro_articles, is_macro=True)
 
-        claude_result = None
+        openai_result = None
         headlines = [a["headline"] for a in articles]
         if headlines and abs(symbol_sentiment["score"]) > 0.3:
-            claude_result = self.claude.analyze(headlines, symbol)
+            openai_result = self.openai.analyze(headlines, symbol)
 
         combined = symbol_sentiment["score"] * 0.50 + macro_sentiment["score"] * 0.30
-        if claude_result and "score" in claude_result:
-            combined += claude_result["score"] * 0.20
+        if openai_result and "score" in openai_result:
+            combined += openai_result["score"] * 0.20
         else:
             combined += symbol_sentiment["score"] * 0.20
 
@@ -2128,7 +2118,7 @@ class SentimentEngine:
             confidence += 0.1
         if macro_sentiment["article_count"] > 3:
             confidence += 0.1
-        if claude_result:
+        if openai_result:
             confidence += 0.2
         confidence = min(confidence, 1.0)
 
@@ -2137,7 +2127,7 @@ class SentimentEngine:
             "confidence": round(confidence, 2),
             "symbol_sentiment": symbol_sentiment,
             "macro_sentiment": macro_sentiment,
-            "claude_analysis": claude_result,
+            "openai_analysis": openai_result,
             "article_count": symbol_sentiment["article_count"] + macro_sentiment["article_count"],
         }
         self._set_cache(f"sentiment_{symbol}", result)
@@ -2174,7 +2164,7 @@ def evaluate(bars: pd.DataFrame, **kwargs) -> dict:
                 "articles": result["article_count"],
                 "macro": result["macro_sentiment"]["score"],
                 "symbol_news": result["symbol_sentiment"]["score"],
-                "claude": result["claude_analysis"] is not None,
+                "openai": result["openai_analysis"] is not None,
             },
         }
     except Exception as e:
