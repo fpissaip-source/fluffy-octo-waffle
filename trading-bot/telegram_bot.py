@@ -272,6 +272,9 @@ class TradingTelegramBot:
             from backtester import BacktestEngine
             bt = BacktestEngine()
             results = bt.run(bars, symbol)
+            if "error" in results or results.get("total_trades", 0) == 0:
+                await update.message.reply_text(f"Backtest {symbol}: {results.get('error', 'Keine Trades generiert')}")
+                return
             text = (
                 f"<b>BACKTEST {symbol}</b>\n━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"Trades: {results['total_trades']}\n"
