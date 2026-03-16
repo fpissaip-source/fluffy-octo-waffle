@@ -257,8 +257,8 @@ class TradeSignal:
             self.reason = f"Only {len(self.results)}/7 formulas ran"
             return
 
-        # Pflicht-Filter: Kelly + Bayesian muessen immer passen (Risiko-Schutz)
-        mandatory = ["Kelly", "Bayesian"]
+        # Pflicht-Filter: nur Kelly muss passen (Edge-Schutz)
+        mandatory = ["Kelly"]
         for m in mandatory:
             if m in self.results and not self.results[m]["passed"]:
                 self.all_passed = False
@@ -266,10 +266,10 @@ class TradeSignal:
                 self.reason = f"Mandatory filter failed: {m}"
                 return
 
-        # Mindestens 5 von 7 Filtern muessen passen
+        # Mindestens 4 von 7 Filtern muessen passen
         passed_count = sum(1 for r in self.results.values() if r["passed"])
         total = len(self.results)
-        min_pass = max(5, total - 2)  # Bei 7 Filtern: mind. 5
+        min_pass = 4
 
         self.all_passed = passed_count >= min_pass
 
