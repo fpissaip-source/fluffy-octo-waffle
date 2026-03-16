@@ -227,7 +227,7 @@ class OpenAIAnalyzer:
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": "gpt-4o-mini",
+                    "model": "gpt-4o",
                     "max_tokens": 300,
                     "messages": [{"role": "user", "content": (
                         f"Analyze these headlines for {symbol} stock sentiment.\n\n"
