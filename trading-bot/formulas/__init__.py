@@ -1,6 +1,6 @@
-from . import momentum, kelly, ev_gap, kl_divergence, bayesian, zscore, sentiment, regime
+from . import momentum, kelly, ev_gap, kl_divergence, bayesian, zscore, sentiment, regime, catalyst
 
 __all__ = [
     "momentum", "kelly", "ev_gap", "kl_divergence",
-    "bayesian", "zscore", "sentiment", "regime",
+    "bayesian", "zscore", "sentiment", "regime", "catalyst",
 ]

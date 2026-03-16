@@ -8,7 +8,7 @@ from config import Config
 from risk_manager import RiskManager, compute_atr
 from adaptive import AdaptiveLearner
 from screener import DynamicScreener
-from formulas import momentum, kelly, ev_gap, kl_divergence, bayesian, zscore, regime
+from formulas import momentum, kelly, ev_gap, kl_divergence, bayesian, zscore, regime, catalyst
 from formulas import sentiment as sentiment_formula
 
 logger = logging.getLogger("bot.engine")
@@ -120,6 +120,12 @@ class Engine:
             signal.add_result(r8)
         except Exception as e:
             signal.add_result({"name": "Regime", "signal": 0, "passed": False, "details": {"error": str(e)}})
+
+        try:
+            r9 = catalyst.evaluate(bars, broker=self.broker, symbol=symbol)
+            signal.add_result(r9)
+        except Exception as e:
+            signal.add_result({"name": "Catalyst", "signal": 0, "passed": True, "details": {"error": str(e)}})
 
         self.risk.update_regime(bars)
 
