@@ -76,7 +76,7 @@ def evaluate(bars: pd.DataFrame, **kwargs) -> dict:
     return {
         "name": "Bayesian",
         "signal": round(u.posterior, 4),
-        "passed": u.posterior > threshold,
+        "passed": u.posterior >= threshold,
         "details": {
             "prior": prior,
             "posterior": round(u.posterior, 4),
