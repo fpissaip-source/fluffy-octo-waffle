@@ -108,7 +108,18 @@ class AlpacaBroker:
         return positions
 
     def has_position(self, symbol: str) -> bool:
-        return symbol in self.get_positions()
+        if symbol in self.get_positions():
+            return True
+        # Also block if there's an open/pending buy order not yet filled
+        try:
+            open_orders = self.api.list_orders(status="open")
+            for order in open_orders:
+                if order.symbol == symbol and order.side == "buy":
+                    logger.debug(f"{symbol}: open buy order {order.id} still pending")
+                    return True
+        except Exception as e:
+            logger.warning(f"list_orders failed: {e}")
+        return False
 
     @_retry
     def get_bars(self, symbol: str, timeframe: str = "5Min", limit: int = 100) -> pd.DataFrame:

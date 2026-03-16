@@ -76,6 +76,7 @@ class Engine:
         self.learner = AdaptiveLearner()
         self.trade_log: list[TradeSignal] = []
         self.position_highs: dict[str, float] = {}
+        self._bought_this_session: set[str] = set()  # guard against duplicate buys
 
     def analyze_symbol(self, symbol: str) -> TradeSignal:
         signal = TradeSignal(symbol)
@@ -134,8 +135,12 @@ class Engine:
             return None
         if signal.qty <= 0:
             return None
+        if signal.symbol in self._bought_this_session:
+            logger.info(f"{signal.symbol}: Buy already executed this session, skipping")
+            return None
         if self.broker.has_position(signal.symbol):
             logger.info(f"{signal.symbol}: Already have position, skipping")
+            self._bought_this_session.add(signal.symbol)  # sync in-memory guard
             return None
 
         positions = self.broker.get_positions()
@@ -159,6 +164,7 @@ class Engine:
             signal.reason += f" -> Order {order_id}"
             self.trade_log.append(signal)
             self.position_highs[signal.symbol] = price
+            self._bought_this_session.add(signal.symbol)
 
             formula_scores = {name: r.get("signal", 0) for name, r in signal.results.items()}
             sentiment_score = signal.results.get("Sentiment", {}).get("signal", 0)
@@ -215,6 +221,7 @@ class Engine:
                     logger.info(f"EXIT {symbol}: {exit_decision['reason']} | P/L: {plpc:+.1%}")
                     self.broker.close_position(symbol)
                     self.position_highs.pop(symbol, None)
+                    self._bought_this_session.discard(symbol)  # allow re-entry after exit
                     self.learner.record_exit(symbol, current_price, exit_decision["reason"])
 
             except Exception as e:
