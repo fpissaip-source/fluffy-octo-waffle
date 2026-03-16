@@ -9,6 +9,7 @@ Usage:
     python main.py --backtest   # Quick Analyse
 """
 
+import os
 import sys
 import logging
 import argparse
@@ -114,7 +115,10 @@ def main():
     elif args.backtest:
         cmd_backtest()
     else:
-        Engine().run()
+        from api import start_api_server
+        engine = Engine()
+        start_api_server(broker=engine.broker, port=int(os.getenv("BOT_API_PORT", "5001")))
+        engine.run()
 
 
 if __name__ == "__main__":
