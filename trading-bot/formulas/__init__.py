@@ -1,15 +1,5 @@
-from .momentum import MomentumFilter
-from .kelly import KellyFilter
-from .ev_gap import EVGapFilter
-from .correlation import CorrelationFilter
-from .bayesian import BayesianFilter
-from .stoikov import StoikovFilter
+# formulas package — alle Module exportieren
+# engine.py importiert: from formulas import momentum, kelly, ev_gap, kl_divergence, bayesian, stoikov
+from . import momentum, kelly, ev_gap, kl_divergence, bayesian, stoikov, sentiment
 
-__all__ = [
-    "MomentumFilter",
-    "KellyFilter",
-    "EVGapFilter",
-    "CorrelationFilter",
-    "BayesianFilter",
-    "StoikovFilter",
-]
+__all__ = ["momentum", "kelly", "ev_gap", "kl_divergence", "bayesian", "stoikov", "sentiment"]

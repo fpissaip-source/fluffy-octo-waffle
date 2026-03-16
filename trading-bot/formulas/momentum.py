@@ -1,145 +1,116 @@
 """
 Formula 1 — Momentum & Mean Reversion Detection
 
-Replaces LMSR (prediction-market specific) with a stock-market equivalent:
-detects whether the current regime is trending or mean-reverting,
-then generates a directional signal with confidence.
+Signale:
+  - RSI (14) fuer Overbought/Oversold
+  - EMA Crossover (8/21) fuer Trendrichtung
+  - Rate of Change (10-bar) fuer Staerke
+  - Bollinger Band Position fuer Mean-Reversion
 
-Uses:
-  - RSI (14-period) for overbought/oversold
-  - EMA crossover (8/21) for trend direction
-  - Rate of Change for momentum strength
-  - Bollinger Band position for mean-reversion signals
+Output: signal (-1.0 bis +1.0), passed (bool)
 """
 
 import numpy as np
-from models import BarData, FilterResult, FilterStatus, Direction
+import pandas as pd
 
 
-class MomentumFilter:
-    """Detects momentum regime and outputs direction + confidence."""
+def _rsi(closes: np.ndarray, period: int = 14) -> float:
+    deltas = np.diff(closes[-(period + 1):])
+    gains = np.where(deltas > 0, deltas, 0)
+    losses = np.where(deltas < 0, -deltas, 0)
+    avg_gain = np.mean(gains) if len(gains) > 0 else 0
+    avg_loss = np.mean(losses) if len(losses) > 0 else 1e-10
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
 
-    def __init__(self):
-        self.name = "Momentum/MeanRev"
 
-    def evaluate(self, bars: list[BarData]) -> tuple[Direction, float, FilterResult]:
-        """
-        Returns (direction, confidence, filter_result).
-        Confidence is 0.0-1.0 representing how strong the signal is.
-        """
-        if len(bars) < 30:
-            return Direction.NEUTRAL, 0.5, FilterResult(
-                name=self.name,
-                status=FilterStatus.SKIP,
-                value=0.0,
-                detail="Not enough bars (need 30+)"
-            )
+def _ema(data: np.ndarray, period: int) -> np.ndarray:
+    alpha = 2 / (period + 1)
+    ema = np.zeros_like(data, dtype=float)
+    ema[0] = data[0]
+    for i in range(1, len(data)):
+        ema[i] = alpha * data[i] + (1 - alpha) * ema[i - 1]
+    return ema
 
-        closes = np.array([b.close for b in bars])
 
-        # ── RSI (14) ──
-        rsi = self._rsi(closes, 14)
+def _bollinger_position(closes: np.ndarray, period: int = 20, num_std: float = 2.0) -> float:
+    if len(closes) < period:
+        return 0.5
+    window = closes[-period:]
+    mean = np.mean(window)
+    std = np.std(window)
+    if std < 1e-10:
+        return 0.5
+    upper = mean + num_std * std
+    lower = mean - num_std * std
+    pos = (closes[-1] - lower) / (upper - lower)
+    return float(np.clip(pos, 0.0, 1.0))
 
-        # ── EMA crossover (8/21) ──
-        ema_fast = self._ema(closes, 8)
-        ema_slow = self._ema(closes, 21)
-        ema_diff = (ema_fast[-1] - ema_slow[-1]) / closes[-1]
 
-        # ── Rate of Change (10-bar) ──
-        roc = (closes[-1] - closes[-11]) / closes[-11] if len(closes) > 11 else 0
+def evaluate(bars: pd.DataFrame, threshold: float = 0.6, **kwargs) -> dict:
+    """
+    Formula-Interface fuer engine.py.
+    bars: pandas DataFrame mit 'close' Spalte.
+    """
+    name = "Momentum"
 
-        # ── Bollinger Band position ──
-        bb_pos = self._bollinger_position(closes, 20, 2.0)
+    if bars is None or bars.empty or len(bars) < 30:
+        return {"name": name, "signal": 0.0, "passed": False,
+                "details": {"error": "Not enough bars"}}
 
-        # ── Aggregate signal ──
-        score = 0.0
-        signals = 0
+    closes = bars["close"].values.astype(float)
 
-        # RSI signal
-        if rsi < 30:
-            score += 0.3  # Oversold → bullish
-            signals += 1
-        elif rsi > 70:
-            score -= 0.3  # Overbought → bearish
-            signals += 1
+    rsi = _rsi(closes, 14)
+    ema_fast = _ema(closes, 8)
+    ema_slow = _ema(closes, 21)
+    ema_diff = (ema_fast[-1] - ema_slow[-1]) / closes[-1]
+    roc = (closes[-1] - closes[-11]) / closes[-11] if len(closes) > 11 else 0.0
+    bb_pos = _bollinger_position(closes, 20, 2.0)
 
-        # EMA crossover
-        if ema_diff > 0.002:
-            score += 0.25
-            signals += 1
-        elif ema_diff < -0.002:
-            score -= 0.25
-            signals += 1
+    score = 0.0
+    signals = 0
 
-        # Rate of change
-        if roc > 0.02:
-            score += 0.25
-            signals += 1
-        elif roc < -0.02:
-            score -= 0.25
-            signals += 1
+    if rsi < 30:
+        score += 0.3
+        signals += 1
+    elif rsi > 70:
+        score -= 0.3
+        signals += 1
 
-        # Bollinger Band
-        if bb_pos < 0.1:
-            score += 0.2  # Near lower band → mean revert up
-            signals += 1
-        elif bb_pos > 0.9:
-            score -= 0.2  # Near upper band → mean revert down
-            signals += 1
+    if ema_diff > 0.002:
+        score += 0.25
+        signals += 1
+    elif ema_diff < -0.002:
+        score -= 0.25
+        signals += 1
 
-        # Direction and confidence
-        if score > 0.15:
-            direction = Direction.LONG
-        elif score < -0.15:
-            direction = Direction.SHORT
-        else:
-            direction = Direction.NEUTRAL
+    if roc > 0.02:
+        score += 0.25
+        signals += 1
+    elif roc < -0.02:
+        score -= 0.25
+        signals += 1
 
-        confidence = min(abs(score) / 0.7, 1.0)  # Normalize to 0-1
-        threshold = 0.15
+    if bb_pos < 0.1:
+        score += 0.2
+        signals += 1
+    elif bb_pos > 0.9:
+        score -= 0.2
+        signals += 1
 
-        passed = abs(score) >= threshold and signals >= 2
+    confidence = min(abs(score) / 0.7, 1.0)
+    passed = confidence >= threshold and signals >= 2 and score > 0
 
-        detail = (
-            f"RSI={rsi:.0f} EMA_diff={ema_diff:+.4f} "
-            f"ROC={roc:+.3f} BB={bb_pos:.2f} → score={score:+.3f}"
-        )
-
-        return direction, confidence, FilterResult(
-            name=self.name,
-            status=FilterStatus.PASS if passed else FilterStatus.FAIL,
-            value=score,
-            detail=detail,
-        )
-
-    @staticmethod
-    def _rsi(closes: np.ndarray, period: int = 14) -> float:
-        deltas = np.diff(closes[-(period + 1):])
-        gains = np.where(deltas > 0, deltas, 0)
-        losses = np.where(deltas < 0, -deltas, 0)
-        avg_gain = np.mean(gains) if len(gains) > 0 else 0
-        avg_loss = np.mean(losses) if len(losses) > 0 else 1e-10
-        rs = avg_gain / avg_loss
-        return 100 - (100 / (1 + rs))
-
-    @staticmethod
-    def _ema(data: np.ndarray, period: int) -> np.ndarray:
-        alpha = 2 / (period + 1)
-        ema = np.zeros_like(data, dtype=float)
-        ema[0] = data[0]
-        for i in range(1, len(data)):
-            ema[i] = alpha * data[i] + (1 - alpha) * ema[i - 1]
-        return ema
-
-    @staticmethod
-    def _bollinger_position(closes: np.ndarray, period: int = 20, num_std: float = 2.0) -> float:
-        if len(closes) < period:
-            return 0.5
-        window = closes[-period:]
-        mean = np.mean(window)
-        std = np.std(window)
-        if std < 1e-10:
-            return 0.5
-        upper = mean + num_std * std
-        lower = mean - num_std * std
-        return (closes[-1] - lower) / (upper - lower)
+    return {
+        "name": name,
+        "signal": round(float(score), 3),
+        "passed": passed,
+        "details": {
+            "rsi": round(rsi, 1),
+            "ema_diff": round(ema_diff, 4),
+            "roc": round(roc, 4),
+            "bb_pos": round(bb_pos, 3),
+            "confidence": round(confidence, 3),
+            "signals": signals,
+        },
+    }
