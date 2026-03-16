@@ -8,7 +8,8 @@ from config import Config
 from risk_manager import RiskManager, compute_atr
 from adaptive import AdaptiveLearner
 from screener import DynamicScreener
-from formulas import momentum, kelly, ev_gap, kl_divergence, bayesian, zscore, regime, catalyst, ai_reasoning
+from formulas import (momentum, kelly, ev_gap, kl_divergence, bayesian, zscore,
+                      regime, catalyst, ai_reasoning, social_sentiment, earnings_filter, orderbook)
 from formulas import sentiment as sentiment_formula
 
 logger = logging.getLogger("bot.engine")
@@ -126,6 +127,24 @@ class Engine:
             signal.add_result(r9)
         except Exception as e:
             signal.add_result({"name": "Catalyst", "signal": 0, "passed": True, "details": {"error": str(e)}})
+
+        try:
+            r11 = social_sentiment.evaluate(bars, symbol=symbol)
+            signal.add_result(r11)
+        except Exception as e:
+            signal.add_result({"name": "Social", "signal": 0, "passed": True, "details": {"error": str(e)}})
+
+        try:
+            r12 = earnings_filter.evaluate(bars, symbol=symbol)
+            signal.add_result(r12)
+        except Exception as e:
+            signal.add_result({"name": "Earnings", "signal": 0, "passed": True, "details": {"error": str(e)}})
+
+        try:
+            r13 = orderbook.evaluate(bars, broker=self.broker, symbol=symbol)
+            signal.add_result(r13)
+        except Exception as e:
+            signal.add_result({"name": "Orderbook", "signal": 0, "passed": True, "details": {"error": str(e)}})
 
         # AI Reasoning — bekommt alle vorherigen Ergebnisse als Kontext
         try:
