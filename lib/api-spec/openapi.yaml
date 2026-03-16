@@ -1,0 +1,571 @@
+openapi: 3.1.0
+info:
+  # Do not change the title, if the title changes, the import paths will be broken
+  title: Api
+  version: 0.1.0
+  description: API specification
+servers:
+  - url: /api
+    description: Base API path
+  - url: /bot-api
+    description: Bot API (Python FastAPI)
+tags:
+  - name: health
+    description: Health operations
+  - name: bot
+    description: Trading bot operations
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      description: Returns server health status
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+
+  /bot-api/status:
+    get:
+      operationId: getBotStatus
+      tags: [bot]
+      summary: Get bot status
+      description: Returns current bot state including equity, regime, and controls
+      responses:
+        "200":
+          description: Bot status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotStatus"
+
+  /bot-api/positions:
+    get:
+      operationId: getPositions
+      tags: [bot]
+      summary: Get open positions
+      responses:
+        "200":
+          description: List of open positions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  positions:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Position"
+                required:
+                  - positions
+
+  /bot-api/trades:
+    get:
+      operationId: getTrades
+      tags: [bot]
+      summary: Get trade history
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+      responses:
+        "200":
+          description: List of trades
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  trades:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Trade"
+                required:
+                  - trades
+
+  /bot-api/stats:
+    get:
+      operationId: getTradeStats
+      tags: [bot]
+      summary: Get trade statistics
+      responses:
+        "200":
+          description: Trade statistics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TradeStats"
+
+  /bot-api/weights:
+    get:
+      operationId: getWeights
+      tags: [bot]
+      summary: Get formula weights
+      responses:
+        "200":
+          description: Formula weights per regime
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WeightsData"
+
+  /bot-api/equity-history:
+    get:
+      operationId: getEquityHistory
+      tags: [bot]
+      summary: Get equity history
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+      responses:
+        "200":
+          description: Equity history points
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  history:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/EquityPoint"
+                required:
+                  - history
+
+  /bot-api/scan/{symbol}:
+    get:
+      operationId: scanSymbol
+      tags: [bot]
+      summary: Scan a symbol with all formulas
+      parameters:
+        - name: symbol
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Scan results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScanResult"
+
+  /bot-api/backtest:
+    get:
+      operationId: runBacktest
+      tags: [bot]
+      summary: Run a historical backtest
+      parameters:
+        - name: symbol
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: timeframe
+          in: query
+          schema:
+            type: string
+            default: 1Day
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 200
+        - name: start_date
+          in: query
+          schema:
+            type: string
+            description: Start date YYYY-MM-DD
+        - name: end_date
+          in: query
+          schema:
+            type: string
+            description: End date YYYY-MM-DD
+      responses:
+        "200":
+          description: Backtest results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BacktestResult"
+
+  /bot-api/control:
+    post:
+      operationId: controlBot
+      tags: [bot]
+      summary: Control the bot (start/stop/pause/resume)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                action:
+                  type: string
+                  enum: [start, stop, pause, resume]
+              required:
+                - action
+      responses:
+        "200":
+          description: Control result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                required:
+                  - status
+
+  /bot-api/watchlist:
+    post:
+      operationId: manageWatchlist
+      tags: [bot]
+      summary: Add or remove symbols from watchlist
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                action:
+                  type: string
+                  enum: [add, remove]
+                symbol:
+                  type: string
+              required:
+                - action
+                - symbol
+      responses:
+        "200":
+          description: Updated watchlist
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  watchlist:
+                    type: array
+                    items:
+                      type: string
+                required:
+                  - watchlist
+
+components:
+  schemas:
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+      required:
+        - status
+
+    BotStatus:
+      type: object
+      properties:
+        equity:
+          type: number
+        cash:
+          type: number
+        buying_power:
+          type: number
+        positions_count:
+          type: integer
+        market_open:
+          type: boolean
+        mode:
+          type: string
+        regime:
+          type: string
+        is_running:
+          type: boolean
+        is_paused:
+          type: boolean
+        kill_switch:
+          type: boolean
+        watchlist:
+          type: array
+          items:
+            type: string
+      required:
+        - equity
+        - cash
+        - buying_power
+        - positions_count
+        - market_open
+        - mode
+        - regime
+        - is_running
+        - is_paused
+        - kill_switch
+        - watchlist
+
+    Position:
+      type: object
+      properties:
+        symbol:
+          type: string
+        qty:
+          type: number
+        avg_entry:
+          type: number
+        current_price:
+          type: number
+        market_value:
+          type: number
+        unrealized_pl:
+          type: number
+        unrealized_plpc:
+          type: number
+        side:
+          type: string
+      required:
+        - symbol
+        - qty
+        - avg_entry
+        - current_price
+        - market_value
+        - unrealized_pl
+        - unrealized_plpc
+        - side
+
+    Trade:
+      type: object
+      properties:
+        id:
+          type: integer
+        symbol:
+          type: string
+        regime:
+          type: string
+        action:
+          type: string
+        qty:
+          type: number
+        entry_price:
+          type: number
+        exit_price:
+          type: number
+          nullable: true
+        pnl:
+          type: number
+          nullable: true
+        pnl_pct:
+          type: number
+          nullable: true
+        entry_time:
+          type: string
+          nullable: true
+        exit_time:
+          type: string
+          nullable: true
+        exit_reason:
+          type: string
+          nullable: true
+        weighted_score:
+          type: number
+          nullable: true
+      required:
+        - id
+        - symbol
+        - regime
+        - action
+        - qty
+        - entry_price
+
+    TradeStats:
+      type: object
+      properties:
+        total_trades:
+          type: integer
+        wins:
+          type: integer
+        losses:
+          type: integer
+        win_rate:
+          type: number
+        avg_win:
+          type: number
+        avg_loss:
+          type: number
+        payoff_ratio:
+          type: number
+        best_trade:
+          type: number
+        worst_trade:
+          type: number
+        total_pnl:
+          type: number
+        sharpe:
+          type: number
+      required:
+        - total_trades
+
+    WeightsData:
+      type: object
+      properties:
+        weights:
+          type: object
+          additionalProperties:
+            type: object
+            additionalProperties:
+              type: number
+        regime:
+          type: string
+      required:
+        - weights
+        - regime
+
+    EquityPoint:
+      type: object
+      properties:
+        timestamp:
+          type: string
+          nullable: true
+        equity:
+          type: number
+        regime:
+          type: string
+          nullable: true
+      required:
+        - equity
+
+    ScanResult:
+      type: object
+      properties:
+        symbol:
+          type: string
+        timestamp:
+          type: string
+        action:
+          type: string
+        all_passed:
+          type: boolean
+        weighted_score:
+          type: number
+        qty:
+          type: integer
+        reason:
+          type: string
+        results:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              signal:
+                type: number
+              passed:
+                type: boolean
+              details:
+                type: object
+                additionalProperties: true
+            required:
+              - signal
+              - passed
+      required:
+        - symbol
+        - timestamp
+        - action
+        - all_passed
+        - weighted_score
+        - qty
+        - reason
+        - results
+
+    BacktestResult:
+      type: object
+      properties:
+        symbol:
+          type: string
+        total_trades:
+          type: integer
+        wins:
+          type: integer
+        losses:
+          type: integer
+        win_rate:
+          type: number
+        total_pnl:
+          type: number
+        total_return:
+          type: string
+        sharpe_ratio:
+          type: number
+        max_drawdown:
+          type: string
+        best_trade:
+          type: string
+        worst_trade:
+          type: string
+        avg_win:
+          type: string
+        avg_loss:
+          type: string
+        final_equity:
+          type: number
+        initial_equity:
+          type: number
+        trades:
+          type: array
+          items:
+            type: object
+            properties:
+              symbol:
+                type: string
+              entry_price:
+                type: number
+              exit_price:
+                type: number
+              qty:
+                type: integer
+              pnl:
+                type: number
+              pnl_pct:
+                type: number
+              reason:
+                type: string
+              entry_time:
+                type: string
+              exit_time:
+                type: string
+            required:
+              - symbol
+              - entry_price
+              - exit_price
+              - qty
+              - pnl
+              - pnl_pct
+              - reason
+              - entry_time
+              - exit_time
+        pnl_curve:
+          type: array
+          items:
+            type: object
+            properties:
+              timestamp:
+                type: string
+              equity:
+                type: number
+            required:
+              - timestamp
+              - equity
+        message:
+          type: string
+      required:
+        - symbol
+        - total_trades
