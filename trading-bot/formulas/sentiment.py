@@ -203,11 +203,61 @@ class ClaudeAnalyzer:
             return None
 
 
+class OpenAIAnalyzer:
+    def __init__(self):
+        self.api_key = Config.OPENAI_API_KEY
+        self.available = bool(self.api_key)
+        self.last_call = 0
+        self.min_interval = 60
+
+    def analyze(self, headlines: list[str], symbol: str) -> Optional[dict]:
+        if not self.available:
+            return None
+        now = time.time()
+        if now - self.last_call < self.min_interval:
+            return None
+        try:
+            import requests
+            import json
+            news_text = "\n".join(f"- {h}" for h in headlines[:10])
+            response = requests.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "gpt-4o-mini",
+                    "max_tokens": 300,
+                    "messages": [{"role": "user", "content": (
+                        f"Analyze these headlines for {symbol} stock sentiment.\n\n"
+                        f"{news_text}\n\n"
+                        f"Respond ONLY with JSON:\n"
+                        f'{{"score": <-1.0 to 1.0>, "confidence": <0 to 1>, '
+                        f'"reason": "<one sentence>"}}'
+                    )}],
+                },
+                timeout=15,
+            )
+            self.last_call = time.time()
+            if response.status_code == 200:
+                data = response.json()
+                text = data["choices"][0]["message"]["content"]
+                match = re.search(r'\{[^}]+\}', text)
+                if match:
+                    return json.loads(match.group())
+            return None
+        except Exception as e:
+            logger.warning(f"OpenAI analysis failed: {e}")
+            return None
+
+
 class SentimentEngine:
     def __init__(self, broker):
         self.news_fetcher = NewsFetcher(broker)
         self.scorer = KeywordScorer()
         self.claude = ClaudeAnalyzer()
+        self.openai = OpenAIAnalyzer()
         self._cache: dict = {}
         self._cache_ttl = 300
 
@@ -232,14 +282,16 @@ class SentimentEngine:
         macro_articles = self.news_fetcher.get_market_news(limit=10)
         macro_sentiment = self.scorer.score_articles(macro_articles, is_macro=True)
 
-        claude_result = None
+        ai_result = None
         headlines = [a["headline"] for a in articles]
         if headlines and abs(symbol_sentiment["score"]) > 0.3:
-            claude_result = self.claude.analyze(headlines, symbol)
+            ai_result = self.claude.analyze(headlines, symbol)
+            if ai_result is None:
+                ai_result = self.openai.analyze(headlines, symbol)
 
         combined = symbol_sentiment["score"] * 0.50 + macro_sentiment["score"] * 0.30
-        if claude_result and "score" in claude_result:
-            combined += claude_result["score"] * 0.20
+        if ai_result and "score" in ai_result:
+            combined += ai_result["score"] * 0.20
         else:
             combined += symbol_sentiment["score"] * 0.20
 
@@ -250,7 +302,7 @@ class SentimentEngine:
             confidence += 0.1
         if macro_sentiment["article_count"] > 3:
             confidence += 0.1
-        if claude_result:
+        if ai_result:
             confidence += 0.2
         confidence = min(confidence, 1.0)
 
@@ -259,7 +311,7 @@ class SentimentEngine:
             "confidence": round(confidence, 2),
             "symbol_sentiment": symbol_sentiment,
             "macro_sentiment": macro_sentiment,
-            "claude_analysis": claude_result,
+            "claude_analysis": ai_result,
             "article_count": symbol_sentiment["article_count"] + macro_sentiment["article_count"],
         }
         self._set_cache(f"sentiment_{symbol}", result)
