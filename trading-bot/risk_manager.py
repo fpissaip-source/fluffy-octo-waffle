@@ -65,40 +65,48 @@ def compute_atr(bars: pd.DataFrame, period: int = 14) -> float:
 
 REGIME_PARAMS = {
     MarketRegime.CALM: {
-        "stop_loss_atr_mult": 2.0,
-        "take_profit_atr_mult": 4.0,
-        "trailing_stop_atr_mult": 1.5,
-        "max_position_pct": 0.12,
-        "kelly_mult": 0.30,
-        "max_open_positions": 5,
-        "description": "Ruhiger Markt",
+        "stop_loss_atr_mult": 1.5,
+        "take_profit_atr_mult": 5.0,
+        "trailing_stop_atr_mult": 1.2,
+        "max_position_pct": 0.30,
+        "kelly_mult": 0.50,
+        "max_open_positions": 2,
+        "stop_loss_pct": 0.10,    # max 10% Verlust pro Trade
+        "take_profit_pct": 0.35,  # 35% Gewinn -> raus
+        "description": "Ruhiger Markt — Challenge Mode",
     },
     MarketRegime.NORMAL: {
-        "stop_loss_atr_mult": 2.5,
+        "stop_loss_atr_mult": 1.5,
         "take_profit_atr_mult": 5.0,
-        "trailing_stop_atr_mult": 2.0,
-        "max_position_pct": 0.10,
-        "kelly_mult": 0.25,
-        "max_open_positions": 4,
-        "description": "Normaler Markt",
+        "trailing_stop_atr_mult": 1.2,
+        "max_position_pct": 0.30,
+        "kelly_mult": 0.50,
+        "max_open_positions": 2,
+        "stop_loss_pct": 0.10,
+        "take_profit_pct": 0.35,
+        "description": "Normaler Markt — Challenge Mode",
     },
     MarketRegime.VOLATILE: {
-        "stop_loss_atr_mult": 3.0,
-        "take_profit_atr_mult": 7.5,
-        "trailing_stop_atr_mult": 2.5,
-        "max_position_pct": 0.06,
-        "kelly_mult": 0.15,
-        "max_open_positions": 3,
-        "description": "Volatile Phase",
+        "stop_loss_atr_mult": 1.5,
+        "take_profit_atr_mult": 6.0,
+        "trailing_stop_atr_mult": 1.2,
+        "max_position_pct": 0.20,
+        "kelly_mult": 0.35,
+        "max_open_positions": 2,
+        "stop_loss_pct": 0.08,
+        "take_profit_pct": 0.40,
+        "description": "Volatile Phase — Challenge Mode",
     },
     MarketRegime.CRISIS: {
-        "stop_loss_atr_mult": 4.0,
-        "take_profit_atr_mult": 12.0,
-        "trailing_stop_atr_mult": 3.5,
-        "max_position_pct": 0.03,
-        "kelly_mult": 0.10,
-        "max_open_positions": 2,
-        "description": "KRISEN-MODUS",
+        "stop_loss_atr_mult": 2.0,
+        "take_profit_atr_mult": 8.0,
+        "trailing_stop_atr_mult": 1.5,
+        "max_position_pct": 0.10,
+        "kelly_mult": 0.20,
+        "max_open_positions": 1,
+        "stop_loss_pct": 0.06,
+        "take_profit_pct": 0.30,
+        "description": "KRISEN-MODUS — defensiv",
     },
 }
 
@@ -204,9 +212,24 @@ class RiskManager:
             "trailing_stop": trailing,
         }
 
+        # Prozentbasierter Stop-Loss (z.B. -10%)
+        sl_pct = self.params.get("stop_loss_pct", 0.10)
+        if current_price <= entry_price * (1 - sl_pct):
+            result["should_exit"] = True
+            result["reason"] = f"STOP LOSS -{sl_pct:.0%} @ ${current_price:.4f}"
+            return result
+
+        # ATR-basierter Stop als zweite Linie
         if current_price <= stops["stop_loss"]:
             result["should_exit"] = True
-            result["reason"] = f"STOP LOSS @ ${stops['stop_loss']}"
+            result["reason"] = f"STOP LOSS (ATR) @ ${stops['stop_loss']}"
+            return result
+
+        # Prozentbasierter Take-Profit (z.B. +35%)
+        tp_pct = self.params.get("take_profit_pct", 0.35)
+        if current_price >= entry_price * (1 + tp_pct):
+            result["should_exit"] = True
+            result["reason"] = f"TAKE PROFIT +{tp_pct:.0%} @ ${current_price:.4f}"
             return result
 
         if current_price > entry_price and current_price <= trailing:
@@ -216,7 +239,7 @@ class RiskManager:
 
         if current_price >= stops["take_profit"]:
             result["should_exit"] = True
-            result["reason"] = f"TAKE PROFIT @ ${stops['take_profit']} ({stops['take_profit_pct']})"
+            result["reason"] = f"TAKE PROFIT (ATR) @ ${stops['take_profit']} ({stops['take_profit_pct']})"
             return result
 
         if bayesian_posterior < 0.30:
