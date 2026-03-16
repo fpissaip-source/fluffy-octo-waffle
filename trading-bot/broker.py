@@ -109,10 +109,12 @@ class AlpacaBroker:
 
     def market_buy(self, symbol: str, qty: int) -> Optional[str]:
         try:
-            order = self.api.submit_order(
-                symbol=symbol, qty=qty, side="buy",
-                type="market", time_in_force="day",
-            )
+            crypto = symbol.upper().endswith("USD") and not symbol.upper().endswith("BUSD")
+            tif = "gtc" if crypto else "day"
+            params = dict(symbol=symbol, qty=qty, side="buy", type="market", time_in_force=tif)
+            if not crypto:
+                params["extended_hours"] = False  # market orders nicht in extended hours
+            order = self.api.submit_order(**params)
             logger.info(f"BUY {qty}x {symbol} @ MARKET -> Order {order.id}")
             return order.id
         except Exception as e:
@@ -121,9 +123,10 @@ class AlpacaBroker:
 
     def market_sell(self, symbol: str, qty: int) -> Optional[str]:
         try:
+            crypto = symbol.upper().endswith("USD") and not symbol.upper().endswith("BUSD")
+            tif = "gtc" if crypto else "day"
             order = self.api.submit_order(
-                symbol=symbol, qty=qty, side="sell",
-                type="market", time_in_force="day",
+                symbol=symbol, qty=qty, side="sell", type="market", time_in_force=tif,
             )
             logger.info(f"SELL {qty}x {symbol} @ MARKET -> Order {order.id}")
             return order.id

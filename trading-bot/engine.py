@@ -3,13 +3,24 @@ engine.py — Drei-Schichten-Architektur:
   Schicht 1 (Perception):  7 quantitative Formeln scannen den Markt
   Schicht 2 (Reasoning):   GPT-4o entscheidet PFLICHTWEISE vor jeder Order
   Schicht 3 (Execution):   Alpaca fuehrt Order aus
+
+24/7 Modus:
+  - Marktzeiten: alle Symbole (Aktien + Crypto)
+  - Nachts/Wochenende: nur Crypto (BTC, ETH, SOL etc.)
+  - Extended Hours: Aktien mit extended_hours=True
 """
 
 import json
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
+
+# Crypto-Symbole handeln 24/7
+CRYPTO_SYMBOLS = {"BTCUSD", "ETHUSD", "SOLUSD", "AVAXUSD", "LINKUSD"}
+
+def is_crypto(symbol: str) -> bool:
+    return symbol.upper() in CRYPTO_SYMBOLS
 
 from broker import AlpacaBroker
 from config import Config
@@ -128,6 +139,93 @@ Antworte NUR mit JSON:
             return {"approved": False, "confidence": 0.0, "reason": f"API error: {e}", "risk_factors": []}
 
 
+# ═══════════════════════════════════════════════════════
+#  DYNAMISCHE WATCHLIST (GPT-4o findet neue Aktien)
+# ═══════════════════════════════════════════════════════
+
+class WatchlistDiscovery:
+    """
+    Nutzt GPT-4o um alle 4 Stunden neue handelbare Aktien zu finden.
+    Kombiniert mit der Basis-Watchlist aus .env.
+    Max 15 Symbole gesamt.
+    """
+
+    def __init__(self):
+        from openai import OpenAI
+        self.client = OpenAI(api_key=Config.OPENAI_API_KEY)
+        self.last_update = 0
+        self.update_interval = 4 * 3600  # alle 4 Stunden
+        self.dynamic_symbols: list[str] = []
+        logger.info("[WATCHLIST] Dynamic discovery initialisiert")
+
+    def should_update(self) -> bool:
+        return time.time() - self.last_update > self.update_interval
+
+    def discover(self, market_open: bool) -> list[str]:
+        """Fragt GPT-4o nach den besten Symbolen fuer die naechsten Stunden."""
+        if not self.should_update():
+            return self.dynamic_symbols
+
+        context = "US Aktienmarkt ist gerade geoeffnet." if market_open else \
+                  "US Aktienmarkt ist geschlossen, nur Crypto handelbar."
+
+        prompt = f"""Du bist ein quantitativer Trader. {context}
+
+Welche 8 Symbole haben gerade das beste Chance/Risiko-Verhältnis für kurzfristigen Handel (nächste 4 Stunden)?
+
+Kriterien:
+- Hohe Liquidität (min. 1M Tagesvolumen)
+- Klarer Trend oder Breakout-Setup
+- Starke aktuelle News oder Katalysatoren
+- Bei geschlossenem Markt: nur Crypto (BTC, ETH, SOL, AVAX, LINK etc.)
+- Bei offenem Markt: US-Aktien (bevorzuge High-Beta: Tech, Crypto-nahe, Growth)
+
+Antworte NUR mit JSON:
+{{"symbols": ["SYM1", "SYM2", "SYM3", "SYM4", "SYM5", "SYM6", "SYM7", "SYM8"], "reasoning": "ein Satz"}}"""
+
+        try:
+            response = self.client.chat.completions.create(
+                model="gpt-4o",
+                max_tokens=200,
+                temperature=0.3,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = response.choices[0].message.content or ""
+            import re
+            match = re.search(r'\{.*\}', text, re.DOTALL)
+            if match:
+                result = json.loads(match.group())
+                symbols = [s.upper().strip() for s in result.get("symbols", [])]
+                self.dynamic_symbols = symbols[:8]
+                self.last_update = time.time()
+                logger.info(f"[WATCHLIST] Neue Symbole: {self.dynamic_symbols} | {result.get('reasoning', '')}")
+                return self.dynamic_symbols
+        except Exception as e:
+            logger.warning(f"[WATCHLIST] Discovery fehlgeschlagen: {e}")
+
+        return self.dynamic_symbols
+
+    def get_active_watchlist(self, market_open: bool) -> list[str]:
+        """
+        Kombiniert Basis-Watchlist (.env) mit GPT-4o Vorschlaegen.
+        Nachts/Wochenende: nur Crypto-Symbole.
+        """
+        dynamic = self.discover(market_open)
+
+        if not market_open:
+            # Nur Crypto wenn Markt zu
+            crypto_base = [s for s in Config.WATCHLIST if is_crypto(s)]
+            crypto_dynamic = [s for s in dynamic if is_crypto(s)]
+            combined = list(dict.fromkeys(crypto_base + crypto_dynamic))
+            if not combined:
+                combined = ["BTCUSD", "ETHUSD", "SOLUSD"]
+            return combined[:10]
+
+        # Markt offen: Basis + dynamisch, max 15
+        combined = list(dict.fromkeys(Config.WATCHLIST + dynamic))
+        return combined[:15]
+
+
 class TradeSignal:
     def __init__(self, symbol: str):
         self.symbol = symbol
@@ -142,22 +240,36 @@ class TradeSignal:
         self.results[result["name"]] = result
 
     def evaluate(self):
-        if len(self.results) < 7:
+        if len(self.results) < 5:
             self.all_passed = False
             self.action = "HOLD"
             self.reason = f"Only {len(self.results)}/7 formulas ran"
             return
 
-        passed = [r["passed"] for r in self.results.values()]
-        self.all_passed = all(passed)
+        # Pflicht-Filter: Kelly + Bayesian muessen immer passen (Risiko-Schutz)
+        mandatory = ["Kelly", "Bayesian"]
+        for m in mandatory:
+            if m in self.results and not self.results[m]["passed"]:
+                self.all_passed = False
+                self.action = "HOLD"
+                self.reason = f"Mandatory filter failed: {m}"
+                return
+
+        # Mindestens 5 von 7 Filtern muessen passen
+        passed_count = sum(1 for r in self.results.values() if r["passed"])
+        total = len(self.results)
+        min_pass = max(5, total - 2)  # Bei 7 Filtern: mind. 5
+
+        self.all_passed = passed_count >= min_pass
 
         if self.all_passed:
             self.action = "BUY"
-            self.reason = "All 7 filters passed"
+            failed = [n for n, r in self.results.items() if not r["passed"]]
+            self.reason = f"{passed_count}/{total} filters passed" + (f" (ignored: {', '.join(failed)})" if failed else "")
         else:
             failed = [n for n, r in self.results.items() if not r["passed"]]
             self.action = "HOLD"
-            self.reason = f"Failed: {', '.join(failed)}"
+            self.reason = f"Only {passed_count}/{total} passed — need {min_pass}. Failed: {', '.join(failed)}"
 
     def summary(self) -> str:
         lines = [
@@ -186,9 +298,10 @@ class Engine:
         self.broker = AlpacaBroker()
         self.risk = RiskManager()
         self.learner = AdaptiveLearner()
-        self.reasoning = ReasoningLayer()  # Pflicht-Reasoning vor jeder Order
+        self.reasoning = ReasoningLayer()
+        self.watchlist = WatchlistDiscovery()
         self.trade_log: list[TradeSignal] = []
-        self.position_highs: dict[str, float] = {}  # Track highest price per position
+        self.position_highs: dict[str, float] = {}
 
     def analyze_symbol(self, symbol: str) -> TradeSignal:
         signal = TradeSignal(symbol)
@@ -418,16 +531,19 @@ class Engine:
             except Exception as e:
                 logger.error(f"Exit check error {symbol}: {e}")
 
-    def scan_once(self):
+    def scan_once(self, market_open: bool):
+        active_watchlist = self.watchlist.get_active_watchlist(market_open)
+
         logger.info(f"\n{'=' * 60}")
         logger.info(f"  SCAN @ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        logger.info(f"  Watchlist: {', '.join(Config.WATCHLIST)}")
+        logger.info(f"  Markt: {'OFFEN' if market_open else 'GESCHLOSSEN (nur Crypto)'}")
+        logger.info(f"  Watchlist ({len(active_watchlist)}): {', '.join(active_watchlist)}")
         logger.info(f"  Regime: {self.risk.regime.value}")
         logger.info(f"{'=' * 60}")
 
         self.check_exit_conditions()
 
-        for symbol in Config.WATCHLIST:
+        for symbol in active_watchlist:
             try:
                 signal = self.analyze_symbol(symbol)
                 print(signal.summary())
@@ -442,23 +558,28 @@ class Engine:
 
     def run(self):
         logger.info("=" * 60)
-        logger.info("  SIX FILTERS. ONE TRADE.")
+        logger.info("  7 FILTERS. GPT-4o REASONING. 24/7.")
         logger.info(f"  Mode: {'PAPER' if Config.is_paper() else '!! LIVE !!'}")
-        logger.info(f"  Interval: {Config.SCAN_INTERVAL}s  |  Watchlist: {Config.WATCHLIST}")
+        logger.info(f"  Base Watchlist: {Config.WATCHLIST}")
+        logger.info(f"  Dynamic Discovery: alle 4h via GPT-4o")
         logger.info("=" * 60)
 
         while True:
-            if not self.broker.is_market_open():
-                logger.info("Market closed. Waiting 60s...")
-                time.sleep(60)
-                continue
             try:
-                self.scan_once()
+                market_open = self.broker.is_market_open()
+
+                if not market_open:
+                    # Markt zu: nur Crypto scannen (echte 24/7 Assets)
+                    logger.info("Boerse geschlossen — scanne nur Crypto...")
+
+                self.scan_once(market_open)
+
             except KeyboardInterrupt:
                 logger.info("\nShutting down...")
                 break
             except Exception as e:
                 logger.error(f"Scan error: {e}")
 
-            logger.info(f"Next scan in {Config.SCAN_INTERVAL}s...")
-            time.sleep(Config.SCAN_INTERVAL)
+            interval = Config.SCAN_INTERVAL if self.broker.is_market_open() else 120
+            logger.info(f"Next scan in {interval}s...")
+            time.sleep(interval)

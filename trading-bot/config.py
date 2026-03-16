@@ -13,7 +13,9 @@ class Config:
     BASE_URL: str = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
 
     WATCHLIST: list[str] = [
-        s.strip() for s in os.getenv("WATCHLIST", "AAPL,TSLA,NVDA").split(",")
+        s.strip() for s in os.getenv(
+            "WATCHLIST", "NVDA,TSLA,AMD,META,COIN,MSTR,PLTR,SMCI,BTCUSD,ETHUSD,SOLUSD"
+        ).split(",")
     ]
 
     MAX_POSITION_PCT: float = float(os.getenv("MAX_POSITION_PCT", "0.10"))
