@@ -1,0 +1,5 @@
+trading-bot/.env
+trading-bot/__pycache__/
+trading-bot/**/__pycache__/
+trading-bot/*.db
+*.pyc
