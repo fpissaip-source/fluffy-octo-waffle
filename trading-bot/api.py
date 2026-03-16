@@ -158,6 +158,7 @@ def create_app(broker=None):
         return None
 
     app = Flask(__name__)
+    app.config["SERVER_NAME"] = None
     app.logger.setLevel(logging.ERROR)
     logging.getLogger("werkzeug").setLevel(logging.ERROR)
 
@@ -189,7 +190,10 @@ def start_api_server(broker=None, port: int = 5001):
 
     def run():
         try:
-            app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+            from werkzeug.serving import make_server
+            server = make_server("0.0.0.0", port, app)
+            logger.info(f"Dashboard laeuft auf http://0.0.0.0:{port}")
+            server.serve_forever()
         except Exception as e:
             logger.error(f"API Server Fehler: {e}")
 
