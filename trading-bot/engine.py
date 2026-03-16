@@ -28,6 +28,7 @@ from risk_manager import RiskManager, compute_atr
 from adaptive import AdaptiveLearner
 from formulas import momentum, kelly, ev_gap, kl_divergence, bayesian, stoikov
 from formulas import sentiment as sentiment_formula
+from market_context import MarketContext
 
 logger = logging.getLogger("bot.engine")
 
@@ -50,6 +51,7 @@ class ReasoningLayer:
         self.client = OpenAI(api_key=Config.OPENAI_API_KEY)
         self.model = Config.REASONING_MODEL
         self.min_confidence = Config.REASONING_MIN_CONFIDENCE
+        self.market_ctx = MarketContext()
         logger.info(f"ReasoningLayer initialisiert: {self.model} (min_confidence={self.min_confidence})")
 
     def approve_trade(
@@ -75,6 +77,8 @@ class ReasoningLayer:
         sentiment_articles = sentiment_details.get("articles", 0)
         macro_score = sentiment_details.get("macro", 0)
 
+        market_context_str = self.market_ctx.format_for_prompt(symbol)
+
         prompt = f"""Du bist ein erfahrener quantitativer Trader. Analysiere dieses Trading-Signal und entscheide ob ein Kauf sinnvoll ist.
 
 SYMBOL: {symbol}
@@ -90,13 +94,15 @@ SENTIMENT-ANALYSE:
   - Makro-Sentiment: {macro_score:+.3f}
   - Analysierte Artikel: {sentiment_articles}
 
+ECHTZEIT MARKT-KONTEXT:
+{market_context_str}
+
 KONTEXT:
-  - Alle 7 Formeln haben bestanden
   - Position-Groesse: ~{signal.qty} Aktien (~${signal.qty * price:,.0f})
   - Risiko: {(signal.qty * price / equity * 100):.1f}% des Depots
 
 Bewerte: Ist das ein gutes Chance/Risiko-Verhaeltnis fuer einen Kauf JETZT?
-Beruecksichtige: Markt-Regime, Sentiment-Daten, Signalstaerke, Positionsgroesse.
+Beruecksichtige: VIX-Level, Sektor-Trend, Sentiment, Signalstaerke, Positionsgroesse.
 
 Antworte NUR mit JSON:
 {{"decision": "BUY" oder "HOLD", "confidence": 0.0-1.0, "reason": "ein Satz auf Deutsch", "risk_factors": ["Faktor1", "Faktor2"]}}"""
