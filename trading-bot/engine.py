@@ -175,16 +175,19 @@ class WatchlistDiscovery:
         context = "US Aktienmarkt ist gerade geoeffnet." if market_open else \
                   "US Aktienmarkt ist geschlossen, nur Crypto handelbar."
 
-        prompt = f"""Du bist ein quantitativer Trader. {context}
+        prompt = f"""Du bist ein konservativer quantitativer Trader mit Fokus auf kapitalerhalt. {context}
 
-Welche 8 Symbole haben gerade das beste Chance/Risiko-Verhältnis für kurzfristigen Handel (nächste 4 Stunden)?
+Welche 8 Symbole bieten gerade ein sicheres 1-5% Gewinnpotenzial mit minimalem Risiko (nächste 4 Stunden)?
 
 Kriterien:
-- Hohe Liquidität (min. 1M Tagesvolumen)
-- Klarer Trend oder Breakout-Setup
-- Starke aktuelle News oder Katalysatoren
-- Bei geschlossenem Markt: nur Crypto (BTC, ETH, SOL, AVAX, LINK etc.)
-- Bei offenem Markt: US-Aktien (bevorzuge High-Beta: Tech, Crypto-nahe, Growth)
+- NUR S&P 500 oder Nasdaq 100 Schwergewichte (Market Cap > 50 Mrd USD)
+- Sehr hohe Liquidität (min. 10M Tagesvolumen)
+- Klarer, ruhiger Aufwärtstrend — KEIN spekulativer Breakout
+- Niedrige Volatilität bevorzugt (Beta < 1.5)
+- Bevorzuge: AAPL, MSFT, GOOGL, AMZN, META, NVDA, TSLA, JPM, V, MA, UNH, JNJ
+- Keine Penny Stocks, keine Micro Caps, kein High-Beta-Zockerpapiere
+- Bei geschlossenem Markt: nur etablierte Crypto (BTC, ETH — keine Altcoins)
+- Ziel: 1-5% sicherer Gewinn, nicht 20% Lotterie
 
 Antworte NUR mit JSON:
 {{"symbols": ["SYM1", "SYM2", "SYM3", "SYM4", "SYM5", "SYM6", "SYM7", "SYM8"], "reasoning": "ein Satz"}}"""
