@@ -109,7 +109,8 @@ def main():
     elif args.status:
         cmd_status()
     elif args.scan_once:
-        Engine().scan_once()
+        e = Engine()
+        Engine().scan_once(market_open=e.broker.is_market_open())
     elif args.backtest:
         cmd_backtest()
     else:
