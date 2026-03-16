@@ -62,8 +62,13 @@ class TradingTelegramBot:
             "/weights — Gewichte\n"
             "/trades  — Trades\n"
             "/backtest AAPL — Backtest\n\n"
-            "<b>Watchlist:</b>\n"
-            "/watchlist — Anzeigen\n"
+            "<b>Screener:</b>\n"
+            "/screener — Top-Mover (alle)\n"
+            "/screener penny — nur Penny Stocks &lt;$5\n"
+            "/screener micro — unter $1\n"
+            "/screener sub — Sub-Penny &lt;$0.01\n\n"
+            "<b>Watchlist (fix):</b>\n"
+            "/watchlist — Aktive Watchlist\n"
             "/add TSLA — Hinzufuegen\n"
             "/remove TSLA — Entfernen\n"
         )
@@ -280,9 +285,54 @@ class TradingTelegramBot:
         except Exception as e:
             await update.message.reply_text(f"Error: {e}")
 
+    async def cmd_screener(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Zeigt aktuelle Top-Mover vom Screener."""
+        await update.message.reply_text("Screener laeuft...")
+        try:
+            from screener import DynamicScreener
+            broker = AlpacaBroker()
+            sc = DynamicScreener(broker)
+
+            # Optionaler Preis-Filter: /screener penny → max $5
+            max_price = None
+            if context.args:
+                arg = context.args[0].lower()
+                if arg == "penny":
+                    max_price = 5.0
+                elif arg == "micro":
+                    max_price = 1.0
+                elif arg == "sub":
+                    max_price = 0.01
+
+            hits = sc.screen(
+                max_results=20,
+                min_volume=Config.SCREEN_MIN_VOLUME,
+                min_price_change_pct=Config.SCREEN_MIN_CHANGE_PCT,
+                min_price=Config.SCREEN_MIN_PRICE,
+                max_price=max_price,
+                min_volume_ratio=Config.SCREEN_MIN_VOL_RATIO,
+            )
+            text = sc.format_summary(hits)
+            await update.message.reply_text(text, parse_mode="HTML")
+        except Exception as e:
+            await update.message.reply_text(f"Error: {e}")
+
+    async def cmd_watchlist_active(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Zeigt die aktive (dynamische) Watchlist."""
+        if self.engine:
+            wl = self.engine.get_active_watchlist()
+            text = (
+                f"<b>AKTIVE WATCHLIST ({len(wl)})</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"<code>{', '.join(wl[:50])}</code>"
+            )
+        else:
+            text = f"<b>WATCHLIST (fix)</b>\n<code>{', '.join(Config.WATCHLIST)}</code>"
+        await update.message.reply_text(text, parse_mode="HTML")
+
     def _scan_loop(self):
         logger.info("Auto-scan thread started")
-        self.send_sync("Auto-Scan gestartet.")
+        self.send_sync("Auto-Scan gestartet — scanne gesamten Markt.")
 
         while True:
             with self._lock:
@@ -301,8 +351,10 @@ class TradingTelegramBot:
                     continue
 
                 self.engine.check_exit_conditions()
+                self.engine._refresh_watchlist()
 
-                for symbol in Config.WATCHLIST:
+                watchlist = self.engine.get_active_watchlist()
+                for symbol in watchlist:
                     with self._lock:
                         if not self.is_running:
                             break
@@ -311,16 +363,22 @@ class TradingTelegramBot:
                         if signal.all_passed:
                             self.send_sync(
                                 f"<b>SIGNAL: BUY {signal.qty}x {signal.symbol}</b>\n"
-                                f"Score: {signal.weighted_score:.2f}"
+                                f"Score: {signal.weighted_score:.2f}\n"
+                                f"{signal.reason}"
                             )
                             order_id = self.engine.execute_signal(signal)
                             if order_id:
-                                self.send_sync(f"ORDER: BUY {signal.qty}x {signal.symbol} -> {order_id}")
+                                self.send_sync(
+                                    f"ORDER EXECUTED\n"
+                                    f"BUY {signal.qty}x {signal.symbol}\n"
+                                    f"Order: <code>{order_id}</code>"
+                                )
                     except Exception as e:
                         logger.error(f"Scan error {symbol}: {e}")
 
             except Exception as e:
                 logger.error(f"Scan loop error: {e}")
+                self.send_sync(f"Scan-Fehler: {e}")
 
             time.sleep(Config.SCAN_INTERVAL)
 
@@ -334,12 +392,13 @@ class TradingTelegramBot:
         handlers = [
             ("start", self.cmd_start), ("status", self.cmd_status),
             ("scan", self.cmd_scan), ("positions", self.cmd_positions),
-            ("trades", self.cmd_trades), ("watchlist", self.cmd_watchlist),
+            ("trades", self.cmd_trades), ("watchlist", self.cmd_watchlist_active),
             ("add", self.cmd_add), ("remove", self.cmd_remove),
             ("pause", self.cmd_pause), ("resume", self.cmd_resume),
             ("run", self.cmd_run), ("stop", self.cmd_stop),
             ("regime", self.cmd_regime), ("stats", self.cmd_stats),
             ("weights", self.cmd_weights), ("backtest", self.cmd_backtest),
+            ("screener", self.cmd_screener),
         ]
         for cmd, handler in handlers:
             self.app.add_handler(CommandHandler(cmd, handler))

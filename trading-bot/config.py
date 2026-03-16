@@ -41,6 +41,16 @@ class Config:
     REQUIRED_FILTERS: list[str] = ["Momentum", "Regime"]
     WEIGHTED_SCORE_THRESHOLD: float = float(os.getenv("WEIGHTED_SCORE_THRESHOLD", "0.55"))
 
+    # ── Dynamischer Screener ──
+    USE_SCREENER: bool = os.getenv("USE_SCREENER", "true").lower() == "true"
+    SCREEN_INTERVAL: int = int(os.getenv("SCREEN_INTERVAL", "300"))      # alle 5 Min neu screenen
+    SCREEN_MAX_RESULTS: int = int(os.getenv("SCREEN_MAX_RESULTS", "50")) # Top 50 Mover
+    SCREEN_MIN_VOLUME: int = int(os.getenv("SCREEN_MIN_VOLUME", "50000"))
+    SCREEN_MIN_CHANGE_PCT: float = float(os.getenv("SCREEN_MIN_CHANGE_PCT", "2.0"))
+    SCREEN_MIN_PRICE: float = float(os.getenv("SCREEN_MIN_PRICE", "0.001"))  # Sub-Penny erlaubt
+    SCREEN_MAX_PRICE: float = float(os.getenv("SCREEN_MAX_PRICE", "0"))      # 0 = kein Limit
+    SCREEN_MIN_VOL_RATIO: float = float(os.getenv("SCREEN_MIN_VOL_RATIO", "1.5"))
+
     @classmethod
     def is_paper(cls) -> bool:
         return "paper" in cls.BASE_URL

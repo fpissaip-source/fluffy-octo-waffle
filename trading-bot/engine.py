@@ -7,6 +7,7 @@ from broker import AlpacaBroker
 from config import Config
 from risk_manager import RiskManager, compute_atr
 from adaptive import AdaptiveLearner
+from screener import DynamicScreener
 from formulas import momentum, kelly, ev_gap, kl_divergence, bayesian, zscore, regime
 from formulas import sentiment as sentiment_formula
 
@@ -74,8 +75,12 @@ class Engine:
         self.broker = AlpacaBroker()
         self.risk = RiskManager()
         self.learner = AdaptiveLearner()
+        self.screener = DynamicScreener(self.broker)
         self.trade_log: list[TradeSignal] = []
         self.position_highs: dict[str, float] = {}
+        self._dynamic_watchlist: list[str] = []
+        self._last_screen_ts: float = 0
+        self._screen_interval: int = Config.SCREEN_INTERVAL
 
     def analyze_symbol(self, symbol: str) -> TradeSignal:
         signal = TradeSignal(symbol)
@@ -220,11 +225,48 @@ class Engine:
             except Exception as e:
                 logger.error(f"Exit check error {symbol}: {e}")
 
+    def _refresh_watchlist(self):
+        """Aktualisiert die dynamische Watchlist via Screener."""
+        now = time.time()
+        if now - self._last_screen_ts < self._screen_interval:
+            return
+
+        logger.info("Screener laeuft — suche Top-Mover...")
+        try:
+            hits = self.screener.get_watchlist(
+                max_results=Config.SCREEN_MAX_RESULTS,
+                min_volume=Config.SCREEN_MIN_VOLUME,
+                min_price_change_pct=Config.SCREEN_MIN_CHANGE_PCT,
+                min_price=Config.SCREEN_MIN_PRICE,
+                max_price=Config.SCREEN_MAX_PRICE if Config.SCREEN_MAX_PRICE > 0 else None,
+                min_volume_ratio=Config.SCREEN_MIN_VOL_RATIO,
+            )
+            # Immer auch die feste Watchlist dazunehmen
+            fixed = [s for s in Config.WATCHLIST if s not in hits]
+            self._dynamic_watchlist = hits + fixed
+            self._last_screen_ts = now
+            logger.info(f"Watchlist aktualisiert: {len(self._dynamic_watchlist)} Symbole "
+                        f"({len(hits)} Screener + {len(fixed)} fix)")
+        except Exception as e:
+            logger.error(f"Screener fehlgeschlagen: {e}")
+            if not self._dynamic_watchlist:
+                self._dynamic_watchlist = list(Config.WATCHLIST)
+
+    def get_active_watchlist(self) -> list[str]:
+        """Gibt aktuelle Watchlist zurueck (dynamisch + fix)."""
+        if not self._dynamic_watchlist:
+            return list(Config.WATCHLIST)
+        return self._dynamic_watchlist
+
     def scan_once(self):
         logger.info(f"SCAN @ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Regime: {self.risk.regime.value}")
         self.check_exit_conditions()
+        self._refresh_watchlist()
 
-        for symbol in Config.WATCHLIST:
+        watchlist = self.get_active_watchlist()
+        logger.info(f"Scanne {len(watchlist)} Symbole...")
+
+        for symbol in watchlist:
             try:
                 signal = self.analyze_symbol(symbol)
                 self._last_signal = signal
