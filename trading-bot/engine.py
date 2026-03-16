@@ -154,7 +154,7 @@ class WatchlistDiscovery:
         from openai import OpenAI
         self.client = OpenAI(api_key=Config.OPENAI_API_KEY)
         self.last_update = 0
-        self.update_interval = 4 * 3600  # alle 4 Stunden
+        self.update_interval = 3600  # alle 1 Stunde
         self.dynamic_symbols: list[str] = []
         logger.info("[WATCHLIST] Dynamic discovery initialisiert")
 
@@ -561,7 +561,7 @@ class Engine:
         logger.info("  7 FILTERS. GPT-4o REASONING. 24/7.")
         logger.info(f"  Mode: {'PAPER' if Config.is_paper() else '!! LIVE !!'}")
         logger.info(f"  Base Watchlist: {Config.WATCHLIST}")
-        logger.info(f"  Dynamic Discovery: alle 4h via GPT-4o")
+        logger.info(f"  Dynamic Discovery: alle 1h via GPT-4o")
         logger.info("=" * 60)
 
         while True:
