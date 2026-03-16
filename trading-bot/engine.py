@@ -1,8 +1,11 @@
 """
-engine.py — Orchestriert alle 6 Formeln.
-ALLE 6 muessen bestehen -> dann wird getradet.
+engine.py — Drei-Schichten-Architektur:
+  Schicht 1 (Perception):  7 quantitative Formeln scannen den Markt
+  Schicht 2 (Reasoning):   GPT-4o entscheidet PFLICHTWEISE vor jeder Order
+  Schicht 3 (Execution):   Alpaca fuehrt Order aus
 """
 
+import json
 import logging
 import time
 from datetime import datetime
@@ -16,6 +19,113 @@ from formulas import momentum, kelly, ev_gap, kl_divergence, bayesian, stoikov
 from formulas import sentiment as sentiment_formula
 
 logger = logging.getLogger("bot.engine")
+
+
+# ═══════════════════════════════════════════════════════
+#  SCHICHT 2: REASONING LAYER (GPT-4o)
+# ═══════════════════════════════════════════════════════
+
+class ReasoningLayer:
+    """
+    Pflicht-Entscheidungsschicht vor jeder Kauforder.
+    GPT-4o bekommt alle Perception-Daten und entscheidet:
+      - BUY:  Handel erlaubt
+      - HOLD: Handel blockiert
+    Ohne gueltige GPT-4o-Bestaetigung wird KEINE Order ausgefuehrt.
+    """
+
+    def __init__(self):
+        from openai import OpenAI
+        self.client = OpenAI(api_key=Config.OPENAI_API_KEY)
+        self.model = Config.REASONING_MODEL
+        self.min_confidence = Config.REASONING_MIN_CONFIDENCE
+        logger.info(f"ReasoningLayer initialisiert: {self.model} (min_confidence={self.min_confidence})")
+
+    def approve_trade(
+        self,
+        symbol: str,
+        signal: "TradeSignal",
+        price: float,
+        equity: float,
+        regime: str,
+    ) -> dict:
+        """
+        Fragt GPT-4o ob der Trade ausgefuehrt werden soll.
+        Returns: {"approved": bool, "confidence": float, "reason": str}
+        """
+        formula_summary = "\n".join(
+            f"  - {name}: signal={r['signal']:.3f} {'PASS' if r['passed'] else 'FAIL'}"
+            + (f" ({r['details'].get('regime','') or ''})" if r.get("details") else "")
+            for name, r in signal.results.items()
+        )
+
+        sentiment_details = signal.results.get("Sentiment", {}).get("details", {})
+        sentiment_score = sentiment_details.get("score", 0)
+        sentiment_articles = sentiment_details.get("articles", 0)
+        macro_score = sentiment_details.get("macro", 0)
+
+        prompt = f"""Du bist ein erfahrener quantitativer Trader. Analysiere dieses Trading-Signal und entscheide ob ein Kauf sinnvoll ist.
+
+SYMBOL: {symbol}
+PREIS: ${price:.2f}
+DEPOT: ${equity:,.2f}
+MARKT-REGIME: {regime}
+
+QUANTITATIVE SIGNALE (Perception Layer):
+{formula_summary}
+
+SENTIMENT-ANALYSE:
+  - Symbol-Sentiment: {sentiment_score:+.3f}
+  - Makro-Sentiment: {macro_score:+.3f}
+  - Analysierte Artikel: {sentiment_articles}
+
+KONTEXT:
+  - Alle 7 Formeln haben bestanden
+  - Position-Groesse: ~{signal.qty} Aktien (~${signal.qty * price:,.0f})
+  - Risiko: {(signal.qty * price / equity * 100):.1f}% des Depots
+
+Bewerte: Ist das ein gutes Chance/Risiko-Verhaeltnis fuer einen Kauf JETZT?
+Beruecksichtige: Markt-Regime, Sentiment-Daten, Signalstaerke, Positionsgroesse.
+
+Antworte NUR mit JSON:
+{{"decision": "BUY" oder "HOLD", "confidence": 0.0-1.0, "reason": "ein Satz auf Deutsch", "risk_factors": ["Faktor1", "Faktor2"]}}"""
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                max_tokens=200,
+                temperature=0.1,
+                messages=[{"role": "user", "content": prompt}],
+                timeout=Config.REASONING_TIMEOUT,
+            )
+            text = response.choices[0].message.content or ""
+
+            import re
+            match = re.search(r'\{[^{}]+\}', text, re.DOTALL)
+            if match:
+                result = json.loads(match.group())
+                approved = (
+                    result.get("decision", "HOLD") == "BUY"
+                    and float(result.get("confidence", 0)) >= self.min_confidence
+                )
+                logger.info(
+                    f"[REASONING] {symbol}: {result.get('decision')} "
+                    f"confidence={result.get('confidence', 0):.2f} | {result.get('reason', '')}"
+                )
+                return {
+                    "approved": approved,
+                    "confidence": float(result.get("confidence", 0)),
+                    "reason": result.get("reason", ""),
+                    "risk_factors": result.get("risk_factors", []),
+                    "raw": result,
+                }
+
+            logger.warning(f"[REASONING] {symbol}: Konnte JSON nicht parsen — Trade BLOCKIERT")
+            return {"approved": False, "confidence": 0.0, "reason": "JSON parse error", "risk_factors": []}
+
+        except Exception as e:
+            logger.error(f"[REASONING] {symbol}: GPT-4o Fehler — Trade BLOCKIERT: {e}")
+            return {"approved": False, "confidence": 0.0, "reason": f"API error: {e}", "risk_factors": []}
 
 
 class TradeSignal:
@@ -54,15 +164,17 @@ class TradeSignal:
             f"\n{'=' * 60}",
             f"  {self.symbol}  |  {self.timestamp.strftime('%H:%M:%S')}",
             f"{'=' * 60}",
+            f"  {'LAYER 1: PERCEPTION':}",
         ]
         for name, r in self.results.items():
             status = "PASS" if r["passed"] else "FAIL"
             lines.append(f"  {name:<16} {status:<8} signal={r['signal']}")
         lines.append(f"{'-' * 60}")
         if self.all_passed:
-            lines.append(f"  > ACTION: {self.action}  |  Qty: {self.qty}")
+            lines.append(f"  LAYER 2: REASONING  -> GPT-4o entscheidet...")
+            lines.append(f"  LAYER 3: EXECUTION  -> Qty: {self.qty}")
         else:
-            lines.append(f"  > ACTION: {self.action}")
+            lines.append(f"  > HOLD (Perception Layer blockiert)")
         lines.append(f"  > REASON: {self.reason}")
         lines.append(f"{'=' * 60}\n")
         return "\n".join(lines)
@@ -74,6 +186,7 @@ class Engine:
         self.broker = AlpacaBroker()
         self.risk = RiskManager()
         self.learner = AdaptiveLearner()
+        self.reasoning = ReasoningLayer()  # Pflicht-Reasoning vor jeder Order
         self.trade_log: list[TradeSignal] = []
         self.position_highs: dict[str, float] = {}  # Track highest price per position
 
@@ -195,9 +308,29 @@ class Engine:
         max_qty = self.risk.max_position_size(equity, price)
         signal.qty = min(signal.qty, max_qty)
 
+        # ── SCHICHT 2: Reasoning Layer (GPT-4o Pflicht-Check) ──
+        reasoning = self.reasoning.approve_trade(
+            symbol=signal.symbol,
+            signal=signal,
+            price=price,
+            equity=equity,
+            regime=self.risk.regime.value,
+        )
+        signal.reason += f" | GPT4o={reasoning['confidence']:.0%}: {reasoning['reason']}"
+
+        if not reasoning["approved"]:
+            logger.warning(
+                f"[REASONING BLOCKED] {signal.symbol}: "
+                f"confidence={reasoning['confidence']:.0%} — {reasoning['reason']}"
+            )
+            if reasoning["risk_factors"]:
+                logger.warning(f"  Risiken: {', '.join(reasoning['risk_factors'])}")
+            return None
+
         logger.info(f"{'=' * 40}")
         logger.info(f"EXECUTING: BUY {signal.qty}x {signal.symbol}")
         logger.info(f"Regime: {self.risk.regime.value} | {self.risk.params['description']}")
+        logger.info(f"GPT-4o: {reasoning['confidence']:.0%} confident — {reasoning['reason']}")
         logger.info(f"{'=' * 40}")
 
         order_id = self.broker.market_buy(signal.symbol, signal.qty)

@@ -1,13 +1,10 @@
 """
 sentiment.py — Multimodale Sentiment-Analyse
 
-Aus dem PDF: "Sentiment-Analyse (News/Social Media), On-Chain-Daten
-(Whale-Movements) und Makro-Daten (Zinsen/Inflation)"
-
-Drei Ebenen:
+Drei Ebenen (alle Pflicht):
 1. Alpaca News API — Echtzeit-Nachrichten pro Symbol
 2. Keyword-Scoring — schnelle Sentiment-Bewertung
-3. Claude API (optional) — Deep Analysis fuer wichtige Events
+3. OpenAI GPT-4o — Deep Analysis (IMMER aktiv, kein Fallback)
 
 Output: Sentiment-Score von -1.0 (extrem bearish) bis +1.0 (extrem bullish)
 """
@@ -234,7 +231,8 @@ class OpenAIAnalyzer:
 
     def __init__(self):
         self.api_key = Config.OPENAI_API_KEY
-        self.available = bool(self.api_key)
+        if not self.api_key:
+            raise RuntimeError("OPENAI_API_KEY fehlt — Sentiment Analysis nicht moeglich")
         self.last_call = 0
         self.min_interval = 60  # Max 1 Call pro Minute
 
@@ -243,8 +241,7 @@ class OpenAIAnalyzer:
         Fragt GPT-4o nach einer Einschaetzung.
         Gibt Score (-1 bis +1) und Begruendung zurueck.
         """
-        if not self.available:
-            logger.warning("OpenAI API key not configured — skipping AI sentiment analysis")
+        if not headlines:
             return None
 
         # Rate limiting
