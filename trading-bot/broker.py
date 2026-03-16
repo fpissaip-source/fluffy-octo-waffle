@@ -167,8 +167,33 @@ class AlpacaBroker:
             logger.warning(f"Snapshot failed {symbol}: {e}")
             return None
 
+    def _is_extended_hours(self) -> bool:
+        """True wenn Pre-Market (4:00-9:30 ET) oder After-Hours (16:00-20:00 ET)."""
+        from datetime import timezone
+        import pytz
+        et = pytz.timezone("America/New_York")
+        now_et = datetime.now(et)
+        t = now_et.hour * 60 + now_et.minute
+        # Pre-market: 04:00-09:30, After-hours: 16:00-20:00
+        return (240 <= t < 570) or (960 <= t < 1200)
+
     def market_buy(self, symbol: str, qty: int) -> Optional[str]:
         try:
+            extended = self._is_extended_hours()
+            if extended:
+                # Extended hours: limit order bei ask-Preis + 0.5%
+                snap = self.api.get_latest_quote(symbol)
+                ask = float(snap.ask_price) if snap.ask_price else None
+                if ask and ask > 0:
+                    limit_price = round(ask * 1.005, 2)
+                    order = self.api.submit_order(
+                        symbol=symbol, qty=qty, side="buy",
+                        type="limit", time_in_force="day",
+                        limit_price=limit_price,
+                        extended_hours=True,
+                    )
+                    logger.info(f"BUY {qty}x {symbol} @ LIMIT {limit_price} (extended hours) -> Order {order.id}")
+                    return order.id
             order = self.api.submit_order(
                 symbol=symbol, qty=qty, side="buy",
                 type="market", time_in_force="day",
@@ -181,6 +206,20 @@ class AlpacaBroker:
 
     def market_sell(self, symbol: str, qty: int) -> Optional[str]:
         try:
+            extended = self._is_extended_hours()
+            if extended:
+                snap = self.api.get_latest_quote(symbol)
+                bid = float(snap.bid_price) if snap.bid_price else None
+                if bid and bid > 0:
+                    limit_price = round(bid * 0.995, 2)
+                    order = self.api.submit_order(
+                        symbol=symbol, qty=qty, side="sell",
+                        type="limit", time_in_force="day",
+                        limit_price=limit_price,
+                        extended_hours=True,
+                    )
+                    logger.info(f"SELL {qty}x {symbol} @ LIMIT {limit_price} (extended hours) -> Order {order.id}")
+                    return order.id
             order = self.api.submit_order(
                 symbol=symbol, qty=qty, side="sell",
                 type="market", time_in_force="day",
@@ -202,4 +241,6 @@ class AlpacaBroker:
 
     @_retry
     def is_market_open(self) -> bool:
-        return self.api.get_clock().is_open
+        if self.api.get_clock().is_open:
+            return True
+        return self._is_extended_hours()
