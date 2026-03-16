@@ -2050,7 +2050,7 @@ class OpenAIAnalyzer:
             client = OpenAI(api_key=self.api_key)
             news_text = "\n".join(f"- {h}" for h in headlines[:10])
             response = client.chat.completions.create(
-                model="gpt-4o-mini",
+                model="gpt-4o",
                 max_tokens=300,
                 messages=[{"role": "user", "content": (
                     f"Analyze these headlines for {symbol} stock sentiment.\n\n"
