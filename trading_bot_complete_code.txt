@@ -1296,7 +1296,6 @@ class Engine:
             signal.reason = "Insufficient data"
             return signal
 
-        snapshot = self.broker.get_snapshot(symbol)
         equity = self.broker.get_equity()
         trade_stats = self.learner.get_trade_history_stats()
 
@@ -2040,6 +2039,7 @@ class OpenAIAnalyzer:
 
     def analyze(self, headlines: list[str], symbol: str) -> Optional[dict]:
         if not self.available:
+            logger.warning("OpenAI API key not configured — skipping AI sentiment analysis")
             return None
         now = time.time()
         if now - self.last_call < self.min_interval:
@@ -2168,11 +2168,11 @@ def evaluate(bars: pd.DataFrame, **kwargs) -> dict:
             },
         }
     except Exception as e:
-        logger.warning(f"Sentiment analysis failed for {symbol}: {e}")
+        logger.error(f"Sentiment analysis failed for {symbol}: {e}")
         return {
             "name": "Sentiment",
             "signal": 0.0,
-            "passed": True,
+            "passed": False,
             "details": {"error": str(e)},
         }
 
