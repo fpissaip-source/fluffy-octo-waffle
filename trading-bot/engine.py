@@ -79,14 +79,19 @@ class ReasoningLayer:
 
         market_context_str = self.market_ctx.format_for_prompt(symbol)
 
-        prompt = f"""Du bist ein erfahrener quantitativer Trader. Analysiere dieses Trading-Signal und entscheide ob ein Kauf sinnvoll ist.
+        cascade_info = f"{signal.cascade_label}" if signal.cascade_level else "unbekannt"
+
+        prompt = f"""Du bist ein erfahrener quantitativer Trader. Analysiere dieses Trading-Signal und triff eine finale Kaufentscheidung.
 
 SYMBOL: {symbol}
 PREIS: ${price:.2f}
 DEPOT: ${equity:,.2f}
 MARKT-REGIME: {regime}
 
-QUANTITATIVE SIGNALE (Perception Layer):
+FILTER-KASKADE: {cascade_info}
+(Hinweis: 7/7 = perfektes Setup, 4/7 = minimales Setup — berücksichtige das in der Wahrscheinlichkeit)
+
+QUANTITATIVE SIGNALE (alle 7 Filter):
 {formula_summary}
 
 SENTIMENT-ANALYSE:
@@ -97,15 +102,16 @@ SENTIMENT-ANALYSE:
 ECHTZEIT MARKT-KONTEXT:
 {market_context_str}
 
-KONTEXT:
-  - Position-Groesse: ~{signal.qty} Aktien (~${signal.qty * price:,.0f})
+POSITION:
+  - Groesse: ~{signal.qty} Aktien (~${signal.qty * price:,.0f})
   - Risiko: {(signal.qty * price / equity * 100):.1f}% des Depots
 
-Bewerte: Ist das ein gutes Chance/Risiko-Verhaeltnis fuer einen Kauf JETZT?
-Beruecksichtige: VIX-Level, Sektor-Trend, Sentiment, Signalstaerke, Positionsgroesse.
+Deine Aufgabe: Gib eine Gewinnwahrscheinlichkeit in % (0-100) und entscheide BUY oder HOLD.
+Bei 7/7 Filtern: hohe Wahrscheinlichkeit erwartet. Bei 4/7: konservativ sein.
+Beruecksichtige: Kaskaden-Level, VIX, Sektor-Trend, Sentiment, Positionsgroesse.
 
 Antworte NUR mit JSON:
-{{"decision": "BUY" oder "HOLD", "confidence": 0.0-1.0, "reason": "ein Satz auf Deutsch", "risk_factors": ["Faktor1", "Faktor2"]}}"""
+{{"decision": "BUY" oder "HOLD", "probability_pct": 0-100, "confidence": 0.0-1.0, "reason": "ein Satz auf Deutsch", "risk_factors": ["Faktor1", "Faktor2"]}}"""
 
         try:
             response = self.client.chat.completions.create(
@@ -125,13 +131,15 @@ Antworte NUR mit JSON:
                     result.get("decision", "HOLD") == "BUY"
                     and float(result.get("confidence", 0)) >= self.min_confidence
                 )
+                prob_pct = int(result.get("probability_pct", round(float(result.get("confidence", 0)) * 100)))
                 logger.info(
                     f"[REASONING] {symbol}: {result.get('decision')} "
-                    f"confidence={result.get('confidence', 0):.2f} | {result.get('reason', '')}"
+                    f"Wahrscheinlichkeit={prob_pct}% | {result.get('reason', '')}"
                 )
                 return {
                     "approved": approved,
                     "confidence": float(result.get("confidence", 0)),
+                    "probability_pct": prob_pct,
                     "reason": result.get("reason", ""),
                     "risk_factors": result.get("risk_factors", []),
                     "raw": result,
@@ -246,6 +254,8 @@ class TradeSignal:
         self.action: Optional[str] = None
         self.qty: int = 0
         self.reason: str = ""
+        self.cascade_level: int = 0
+        self.cascade_label: str = ""
 
     def add_result(self, result: dict):
         self.results[result["name"]] = result
@@ -257,30 +267,41 @@ class TradeSignal:
             self.reason = f"Only {len(self.results)}/7 formulas ran"
             return
 
-        # Pflicht-Filter: nur Kelly muss passen (Edge-Schutz)
-        mandatory = ["Kelly"]
-        for m in mandatory:
-            if m in self.results and not self.results[m]["passed"]:
-                self.all_passed = False
-                self.action = "HOLD"
-                self.reason = f"Mandatory filter failed: {m}"
-                return
+        # Pflicht-Filter: Kelly muss immer passen (Edge-Schutz)
+        if "Kelly" in self.results and not self.results["Kelly"]["passed"]:
+            self.all_passed = False
+            self.action = "HOLD"
+            self.reason = "Mandatory filter failed: Kelly"
+            return
 
-        # Mindestens 4 von 7 Filtern muessen passen
+        # Kaskade: pruefe 7→6→5→4, GPT-4o entscheidet am Ende
         passed_count = sum(1 for r in self.results.values() if r["passed"])
         total = len(self.results)
-        min_pass = 4
 
-        self.all_passed = passed_count >= min_pass
-
-        if self.all_passed:
-            self.action = "BUY"
-            failed = [n for n, r in self.results.items() if not r["passed"]]
-            self.reason = f"{passed_count}/{total} filters passed" + (f" (ignored: {', '.join(failed)})" if failed else "")
+        if passed_count >= 7:
+            self.cascade_level = 7
+            self.cascade_label = "PERFEKT (7/7) — Maximales Signal"
+        elif passed_count >= 6:
+            self.cascade_level = 6
+            self.cascade_label = "STARK (6/7) — Hohes Signal"
+        elif passed_count >= 5:
+            self.cascade_level = 5
+            self.cascade_label = "GUT (5/7) — Solides Signal"
+        elif passed_count >= 4:
+            self.cascade_level = 4
+            self.cascade_label = "MINIMAL (4/7) — Schwaches Signal"
         else:
-            failed = [n for n, r in self.results.items() if not r["passed"]]
+            self.all_passed = False
             self.action = "HOLD"
-            self.reason = f"Only {passed_count}/{total} passed — need {min_pass}. Failed: {', '.join(failed)}"
+            failed = [n for n, r in self.results.items() if not r["passed"]]
+            self.reason = f"Zu schwach: nur {passed_count}/{total} — GPT-4o nicht befragt. Failed: {', '.join(failed)}"
+            return
+
+        # Ab 4/7 + Kelly ✓ → GPT-4o entscheidet
+        self.all_passed = True
+        self.action = "BUY"
+        failed = [n for n, r in self.results.items() if not r["passed"]]
+        self.reason = f"{self.cascade_label} → GPT-4o befragt" + (f" | Offen: {', '.join(failed)}" if failed else "")
 
     def summary(self) -> str:
         lines = [
@@ -440,7 +461,7 @@ class Engine:
             equity=equity,
             regime=self.risk.regime.value,
         )
-        signal.reason += f" | GPT4o={reasoning['confidence']:.0%}: {reasoning['reason']}"
+        signal.reason += f" | GPT4o={reasoning.get('probability_pct', round(reasoning['confidence']*100))}%: {reasoning['reason']}"
 
         if not reasoning["approved"]:
             logger.warning(
@@ -454,7 +475,7 @@ class Engine:
         logger.info(f"{'=' * 40}")
         logger.info(f"EXECUTING: BUY {signal.qty}x {signal.symbol}")
         logger.info(f"Regime: {self.risk.regime.value} | {self.risk.params['description']}")
-        logger.info(f"GPT-4o: {reasoning['confidence']:.0%} confident — {reasoning['reason']}")
+        logger.info(f"GPT-4o: {reasoning.get('probability_pct', round(reasoning['confidence']*100))}% Wahrscheinlichkeit — {reasoning['reason']}")
         logger.info(f"{'=' * 40}")
 
         order_id = self.broker.market_buy(signal.symbol, signal.qty)
