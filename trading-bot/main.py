@@ -98,16 +98,7 @@ def main():
     print("  +==========================================+")
     print()
 
-    if args.telegram:
-        if not Config.TELEGRAM_TOKEN or Config.TELEGRAM_TOKEN == "your_telegram_bot_token_here":
-            print("  Telegram nicht konfiguriert!")
-            print("  Trage TELEGRAM_TOKEN und TELEGRAM_CHAT_ID in .env ein.")
-            print("  Siehe README fuer Anleitung.\n")
-            sys.exit(1)
-        from telegram_bot import TradingTelegramBot
-        bot = TradingTelegramBot()
-        bot.run()
-    elif args.status:
+    if args.status:
         cmd_status()
     elif args.scan_once:
         e = Engine()
@@ -115,10 +106,22 @@ def main():
     elif args.backtest:
         cmd_backtest()
     else:
+        # Always start the API dashboard for long-running modes
         from api import start_api_server
         engine = Engine()
         start_api_server(broker=engine.broker, port=int(os.getenv("BOT_API_PORT", "5001")))
-        engine.run()
+
+        if args.telegram:
+            if not Config.TELEGRAM_TOKEN or Config.TELEGRAM_TOKEN == "your_telegram_bot_token_here":
+                print("  Telegram nicht konfiguriert!")
+                print("  Trage TELEGRAM_TOKEN und TELEGRAM_CHAT_ID in .env ein.")
+                print("  Siehe README fuer Anleitung.\n")
+                sys.exit(1)
+            from telegram_bot import TradingTelegramBot
+            bot = TradingTelegramBot()
+            bot.run()
+        else:
+            engine.run()
 
 
 if __name__ == "__main__":
