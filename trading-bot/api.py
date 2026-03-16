@@ -5,13 +5,20 @@ from typing import Optional
 
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
+import os as _os
 
 from config import Config
 
 logger = logging.getLogger("bot.api")
 
 app = FastAPI(title="Trading Bot API", version="2.0")
+
+@app.get("/")
+def dashboard():
+    path = _os.path.join(_os.path.dirname(__file__), "dashboard.html")
+    return FileResponse(path)
 
 import os
 _allowed_origins = os.getenv("CORS_ORIGINS", "").split(",") if os.getenv("CORS_ORIGINS") else ["*"]
