@@ -175,19 +175,21 @@ class WatchlistDiscovery:
         context = "US Aktienmarkt ist gerade geoeffnet." if market_open else \
                   "US Aktienmarkt ist geschlossen, nur Crypto handelbar."
 
-        prompt = f"""Du bist ein konservativer quantitativer Trader mit Fokus auf kapitalerhalt. {context}
+        prompt = f"""Du bist ein aggressiver Day-Trader spezialisiert auf Micro Caps und Penny Stocks. {context}
 
-Welche 8 Symbole bieten gerade ein sicheres 1-5% Gewinnpotenzial mit minimalem Risiko (nächste 4 Stunden)?
+Welche 8 Symbole haben gerade das höchste Kurspotenzial für schnelle 10-50% Moves heute?
 
-Kriterien:
-- NUR S&P 500 oder Nasdaq 100 Schwergewichte (Market Cap > 50 Mrd USD)
-- Sehr hohe Liquidität (min. 10M Tagesvolumen)
-- Klarer, ruhiger Aufwärtstrend — KEIN spekulativer Breakout
-- Niedrige Volatilität bevorzugt (Beta < 1.5)
-- Bevorzuge: AAPL, MSFT, GOOGL, AMZN, META, NVDA, TSLA, JPM, V, MA, UNH, JNJ
-- Keine Penny Stocks, keine Micro Caps, kein High-Beta-Zockerpapiere
-- Bei geschlossenem Markt: nur etablierte Crypto (BTC, ETH — keine Altcoins)
-- Ziel: 1-5% sicherer Gewinn, nicht 20% Lotterie
+HAUPTFOKUS — Micro Caps / Penny Stocks (6 von 8 Symbolen):
+- Market Cap unter 500 Mio USD
+- Kurs zwischen $0.50 und $15
+- Extrem hohes relatives Volumen (mind. 3x Durchschnitt heute)
+- Starker Katalysator: News, PR, FDA, Earnings, Short Squeeze, Biotech-Daten
+- Float unter 50 Mio Aktien bevorzugt (leichter zu bewegen)
+- Beispiele: OTC-Aktien, Small-Cap NYSE/Nasdaq mit Momentum heute
+
+NEBENSÄCHLICH — Large Caps als Absicherung (2 von 8 Symbolen):
+- Aus S&P 500, klarer Trend, für stabile 1-5% Gewinne
+- Bei geschlossenem Markt: nur Crypto (BTCUSD, ETHUSD)
 
 Antworte NUR mit JSON:
 {{"symbols": ["SYM1", "SYM2", "SYM3", "SYM4", "SYM5", "SYM6", "SYM7", "SYM8"], "reasoning": "ein Satz"}}"""
