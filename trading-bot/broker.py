@@ -68,11 +68,15 @@ class AlpacaBroker:
         end = datetime.now()
         start = end - timedelta(days=max(7, limit // 78 + 3))
 
+        # Crypto braucht anderen Feed als Aktien
+        crypto_symbols = {"BTCUSD", "ETHUSD", "SOLUSD", "AVAXUSD", "LINKUSD"}
+        feed = "crypto" if symbol.upper() in crypto_symbols else "iex"
+
         bars = self.api.get_bars(
             symbol, tf,
             start=start.strftime("%Y-%m-%d"),
             end=end.strftime("%Y-%m-%d"),
-            limit=limit, feed="iex",
+            limit=limit, feed=feed,
         ).df
 
         if bars.empty:
