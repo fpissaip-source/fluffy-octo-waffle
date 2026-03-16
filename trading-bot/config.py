@@ -38,7 +38,7 @@ class Config:
 
     BOT_API_PORT: int = int(os.getenv("BOT_API_PORT", "5001"))
 
-    REQUIRED_FILTERS: list[str] = ["Momentum", "Regime", "Catalyst"]
+    REQUIRED_FILTERS: list[str] = ["Momentum", "Regime", "Catalyst", "AI-Reasoning"]
     WEIGHTED_SCORE_THRESHOLD: float = float(os.getenv("WEIGHTED_SCORE_THRESHOLD", "0.55"))
 
     # ── Dynamischer Screener ──

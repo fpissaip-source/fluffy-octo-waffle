@@ -8,7 +8,7 @@ from config import Config
 from risk_manager import RiskManager, compute_atr
 from adaptive import AdaptiveLearner
 from screener import DynamicScreener
-from formulas import momentum, kelly, ev_gap, kl_divergence, bayesian, zscore, regime, catalyst
+from formulas import momentum, kelly, ev_gap, kl_divergence, bayesian, zscore, regime, catalyst, ai_reasoning
 from formulas import sentiment as sentiment_formula
 
 logger = logging.getLogger("bot.engine")
@@ -126,6 +126,19 @@ class Engine:
             signal.add_result(r9)
         except Exception as e:
             signal.add_result({"name": "Catalyst", "signal": 0, "passed": True, "details": {"error": str(e)}})
+
+        # AI Reasoning — bekommt alle vorherigen Ergebnisse als Kontext
+        try:
+            r10 = ai_reasoning.evaluate(
+                bars,
+                broker=self.broker,
+                symbol=symbol,
+                formula_results=signal.results,
+                regime=self.risk.regime.value,
+            )
+            signal.add_result(r10)
+        except Exception as e:
+            signal.add_result({"name": "AI-Reasoning", "signal": 0, "passed": True, "details": {"error": str(e)}})
 
         self.risk.update_regime(bars)
 
