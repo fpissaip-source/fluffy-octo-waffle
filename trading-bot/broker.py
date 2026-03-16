@@ -1,6 +1,5 @@
-"""broker.py — Alpaca API Wrapper. Handles account, market data, orders."""
-
 import logging
+import time
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -12,6 +11,25 @@ from config import Config
 
 logger = logging.getLogger("bot.broker")
 
+MAX_RETRIES = 3
+RETRY_DELAY = 2
+
+
+def _retry(func):
+    def wrapper(*args, **kwargs):
+        for attempt in range(MAX_RETRIES):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                if attempt < MAX_RETRIES - 1:
+                    delay = RETRY_DELAY * (2 ** attempt)
+                    logger.warning(f"{func.__name__} failed (attempt {attempt + 1}): {e}. Retrying in {delay}s...")
+                    time.sleep(delay)
+                else:
+                    logger.error(f"{func.__name__} failed after {MAX_RETRIES} attempts: {e}")
+                    raise
+    return wrapper
+
 
 class AlpacaBroker:
     def __init__(self):
@@ -20,6 +38,9 @@ class AlpacaBroker:
             secret_key=Config.SECRET_KEY,
             base_url=Config.BASE_URL,
         )
+        self._consecutive_errors = 0
+        self._circuit_open = False
+        self._circuit_reset_time = 0
         self._validate_connection()
 
     def _validate_connection(self):
@@ -27,19 +48,52 @@ class AlpacaBroker:
             account = self.api.get_account()
             mode = "PAPER" if Config.is_paper() else "!! LIVE !!"
             logger.info(f"Connected [{mode}]  Equity: ${float(account.equity):,.2f}")
+            self._consecutive_errors = 0
         except Exception as e:
             logger.error(f"Connection failed: {e}")
             raise
 
-    def get_equity(self) -> float:
-        return float(self.api.get_account().equity)
+    def _check_circuit(self) -> bool:
+        if self._circuit_open:
+            if time.time() > self._circuit_reset_time:
+                self._circuit_open = False
+                self._consecutive_errors = 0
+                logger.info("Circuit breaker reset")
+                return False
+            return True
+        return False
 
+    def _record_error(self):
+        self._consecutive_errors += 1
+        if self._consecutive_errors >= 3:
+            self._circuit_open = True
+            self._circuit_reset_time = time.time() + 60
+            logger.critical("Circuit breaker OPEN — pausing API calls for 60s")
+
+    def _record_success(self):
+        self._consecutive_errors = 0
+
+    @_retry
+    def get_equity(self) -> float:
+        if self._check_circuit():
+            raise RuntimeError("Circuit breaker open")
+        try:
+            result = float(self.api.get_account().equity)
+            self._record_success()
+            return result
+        except Exception:
+            self._record_error()
+            raise
+
+    @_retry
     def get_buying_power(self) -> float:
         return float(self.api.get_account().buying_power)
 
+    @_retry
     def get_cash(self) -> float:
         return float(self.api.get_account().cash)
 
+    @_retry
     def get_positions(self) -> dict:
         positions = {}
         for p in self.api.list_positions():
@@ -56,6 +110,7 @@ class AlpacaBroker:
     def has_position(self, symbol: str) -> bool:
         return symbol in self.get_positions()
 
+    @_retry
     def get_bars(self, symbol: str, timeframe: str = "5Min", limit: int = 100) -> pd.DataFrame:
         tf_map = {
             "1Min": tradeapi.TimeFrame.Minute,
@@ -85,13 +140,18 @@ class AlpacaBroker:
         bars.dropna(inplace=True)
         return bars
 
+    @_retry
     def get_latest_price(self, symbol: str) -> Optional[float]:
         try:
-            return float(self.api.get_latest_trade(symbol).price)
+            price = float(self.api.get_latest_trade(symbol).price)
+            self._record_success()
+            return price
         except Exception as e:
+            self._record_error()
             logger.warning(f"Price failed {symbol}: {e}")
             return None
 
+    @_retry
     def get_snapshot(self, symbol: str) -> Optional[dict]:
         try:
             snap = self.api.get_snapshot(symbol)
@@ -131,19 +191,6 @@ class AlpacaBroker:
             logger.error(f"Sell failed {symbol}: {e}")
             return None
 
-    def limit_buy(self, symbol: str, qty: int, limit_price: float) -> Optional[str]:
-        try:
-            order = self.api.submit_order(
-                symbol=symbol, qty=qty, side="buy",
-                type="limit", time_in_force="day",
-                limit_price=round(limit_price, 2),
-            )
-            logger.info(f"BUY {qty}x {symbol} @ LIMIT ${limit_price:.2f} -> Order {order.id}")
-            return order.id
-        except Exception as e:
-            logger.error(f"Limit buy failed {symbol}: {e}")
-            return None
-
     def close_position(self, symbol: str) -> Optional[str]:
         try:
             order = self.api.close_position(symbol)
@@ -153,5 +200,6 @@ class AlpacaBroker:
             logger.error(f"Close failed {symbol}: {e}")
             return None
 
+    @_retry
     def is_market_open(self) -> bool:
         return self.api.get_clock().is_open

@@ -1,92 +1,5 @@
-"""
-Formula 1 — Momentum & Mean Reversion Detection
-
-Detects whether the current regime is trending or mean-reverting,
-then generates a directional signal with confidence.
-
-Uses:
-  - RSI (14-period) for overbought/oversold
-  - EMA crossover (8/21) for trend direction
-  - Rate of Change for momentum strength
-  - Bollinger Band position for mean-reversion signals
-"""
-
 import numpy as np
 import pandas as pd
-
-from config import Config
-
-
-def evaluate(bars: pd.DataFrame, **kwargs) -> dict:
-    if len(bars) < 30:
-        return {"name": "Momentum", "signal": 0.0, "passed": False,
-                "details": {"error": "Not enough bars (need 30+)"}}
-
-    threshold = kwargs.get("threshold", Config.MIN_MOMENTUM_SCORE)
-    closes = bars["close"].values
-
-    # ── RSI (14) ──
-    rsi = _rsi(closes, 14)
-
-    # ── EMA crossover (8/21) ──
-    ema_fast = _ema(closes, 8)
-    ema_slow = _ema(closes, 21)
-    ema_diff = (ema_fast[-1] - ema_slow[-1]) / closes[-1]
-
-    # ── Rate of Change (10-bar) ──
-    roc = (closes[-1] - closes[-11]) / closes[-11] if len(closes) > 11 else 0.0
-
-    # ── Bollinger Band position ──
-    bb_pos = _bollinger_position(closes, 20, 2.0)
-
-    # ── Aggregate signal ──
-    score = 0.0
-    signals = 0
-
-    if rsi < 30:
-        score += 0.3
-        signals += 1
-    elif rsi > 70:
-        score -= 0.3
-        signals += 1
-
-    if ema_diff > 0.002:
-        score += 0.25
-        signals += 1
-    elif ema_diff < -0.002:
-        score -= 0.25
-        signals += 1
-
-    if roc > 0.02:
-        score += 0.25
-        signals += 1
-    elif roc < -0.02:
-        score -= 0.25
-        signals += 1
-
-    if bb_pos < 0.1:
-        score += 0.2
-        signals += 1
-    elif bb_pos > 0.9:
-        score -= 0.2
-        signals += 1
-
-    passed = score >= threshold and signals >= 2
-
-    return {
-        "name": "Momentum",
-        "signal": round(score, 4),
-        "passed": passed,
-        "details": {
-            "rsi": round(rsi, 1),
-            "ema_diff": round(ema_diff, 5),
-            "roc": round(roc, 4),
-            "bb_pos": round(bb_pos, 3),
-            "score": round(score, 4),
-            "signals": signals,
-            "threshold": threshold,
-        },
-    }
 
 
 def _rsi(closes: np.ndarray, period: int = 14) -> float:
@@ -118,4 +31,67 @@ def _bollinger_position(closes: np.ndarray, period: int = 20, num_std: float = 2
         return 0.5
     upper = mean + num_std * std
     lower = mean - num_std * std
-    return float((closes[-1] - lower) / (upper - lower))
+    return (closes[-1] - lower) / (upper - lower)
+
+
+def evaluate(bars: pd.DataFrame, **kwargs) -> dict:
+    if len(bars) < 30:
+        return {"name": "Momentum", "signal": 0.0, "passed": False,
+                "details": {"error": "Need 30+ bars"}}
+
+    closes = bars["close"].values
+    threshold = kwargs.get("threshold", 0.15)
+
+    rsi = _rsi(closes, 14)
+    ema_fast = _ema(closes, 8)
+    ema_slow = _ema(closes, 21)
+    ema_diff = (ema_fast[-1] - ema_slow[-1]) / closes[-1]
+    roc = (closes[-1] - closes[-11]) / closes[-11] if len(closes) > 11 else 0
+    bb_pos = _bollinger_position(closes, 20, 2.0)
+
+    score = 0.0
+    signals = 0
+
+    if rsi < 30:
+        score += 0.3
+        signals += 1
+    elif rsi > 70:
+        score -= 0.3
+        signals += 1
+
+    if ema_diff > 0.002:
+        score += 0.25
+        signals += 1
+    elif ema_diff < -0.002:
+        score -= 0.25
+        signals += 1
+
+    if roc > 0.02:
+        score += 0.25
+        signals += 1
+    elif roc < -0.02:
+        score -= 0.25
+        signals += 1
+
+    if bb_pos < 0.1:
+        score += 0.2
+        signals += 1
+    elif bb_pos > 0.9:
+        score -= 0.2
+        signals += 1
+
+    passed = abs(score) >= threshold and signals >= 2 and score > 0
+
+    return {
+        "name": "Momentum",
+        "signal": round(score, 4),
+        "passed": passed,
+        "details": {
+            "rsi": round(rsi, 1),
+            "ema_diff": f"{ema_diff:+.4f}",
+            "roc": f"{roc:+.3f}",
+            "bb_position": round(bb_pos, 2),
+            "score": round(score, 3),
+            "signals_triggered": signals,
+        },
+    }

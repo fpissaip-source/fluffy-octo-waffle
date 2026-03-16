@@ -1,11 +1,6 @@
-"""
-Formula 2 — Kelly Criterion
-f* = (p * b - q) / b
-Wir verwenden Quarter-Kelly fuer konservatives Sizing.
-"""
-
 import numpy as np
 import pandas as pd
+
 from config import Config
 
 
@@ -15,20 +10,22 @@ def kelly_fraction(win_prob: float, payoff_ratio: float) -> float:
     return max(0.0, min(f_star, 1.0))
 
 
-def evaluate(bars: pd.DataFrame, equity: float = 10000.0, **kwargs) -> dict:
+def evaluate(bars: pd.DataFrame, **kwargs) -> dict:
     if len(bars) < 20:
         return {"name": "Kelly", "signal": 0.0, "passed": False,
                 "details": {"error": "Not enough data"}}
 
-    returns = bars["returns"].dropna()
+    equity = kwargs.get("equity", 10000.0)
+    trade_history_stats = kwargs.get("trade_history_stats", None)
 
-    # Win rate und Payoff aus historischen Returns
-    win_prob = (returns > 0).sum() / len(returns)
-    gains = returns[returns > 0]
-    losses = returns[returns < 0]
-    avg_gain = gains.mean() if len(gains) > 0 else 0.001
-    avg_loss = abs(losses.mean()) if len(losses) > 0 else 0.001
-    payoff = min(avg_gain / avg_loss, 10.0)
+    if trade_history_stats and trade_history_stats.get("total_trades", 0) >= 5:
+        win_prob = trade_history_stats["win_rate"]
+        payoff = trade_history_stats.get("payoff_ratio", 1.5)
+        source = "trade_history"
+    else:
+        win_prob = 0.50
+        payoff = 1.5
+        source = "default_conservative"
 
     full_kelly = kelly_fraction(win_prob, payoff)
     adjusted = full_kelly * Config.KELLY_FRACTION
@@ -47,5 +44,6 @@ def evaluate(bars: pd.DataFrame, equity: float = 10000.0, **kwargs) -> dict:
             "final_pct": round(final_pct, 4),
             "bet_size_usd": round(bet_size, 2),
             "fraction_used": f"{Config.KELLY_FRACTION}x Kelly",
+            "data_source": source,
         },
     }

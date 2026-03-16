@@ -1,21 +1,13 @@
 #!/usr/bin/env python3
-"""
-main.py — SIX FILTERS. ONE TRADE.
-
-Usage:
-    python main.py              # Bot starten (Endlosschleife)
-    python main.py --scan-once  # Einmaliger Scan
-    python main.py --status     # Account Status
-    python main.py --backtest   # Quick Analyse
-"""
-
 import sys
+import os
 import logging
 import argparse
+import threading
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import Config
-from engine import Engine
-from broker import AlpacaBroker
 
 
 def setup_logging():
@@ -26,93 +18,116 @@ def setup_logging():
     logging.getLogger("websocket").setLevel(logging.WARNING)
 
 
+def init_database():
+    from database import init_db
+    init_db()
+
+
+def start_api_server():
+    import uvicorn
+    from api import app
+    port = Config.BOT_API_PORT
+    logging.getLogger("bot.main").info(f"Starting FastAPI on port {port}")
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
+
+
 def cmd_status():
+    from broker import AlpacaBroker
     broker = AlpacaBroker()
     equity = broker.get_equity()
     cash = broker.get_cash()
-    bp = broker.get_buying_power()
     positions = broker.get_positions()
 
     print(f"\n{'=' * 50}")
     print(f"  ACCOUNT STATUS  ({'PAPER' if Config.is_paper() else 'LIVE'})")
     print(f"{'=' * 50}")
-    print(f"  Equity:        ${equity:,.2f}")
-    print(f"  Cash:          ${cash:,.2f}")
-    print(f"  Buying Power:  ${bp:,.2f}")
-    print(f"  Positions:     {len(positions)}")
-    print(f"{'-' * 50}")
+    print(f"  Equity:       ${equity:,.2f}")
+    print(f"  Cash:         ${cash:,.2f}")
+    print(f"  Positions:    {len(positions)}")
     if positions:
         for sym, pos in positions.items():
             pl = pos['unrealized_pl']
-            plpc = pos['unrealized_plpc']
             pre = "+" if pl >= 0 else ""
-            print(f"  {sym:<8} {pos['qty']:>6} shares @ ${pos['avg_entry']:.2f}"
-                  f"  {pre}${pl:.2f} ({pre}{plpc:.1%})")
-    else:
-        print("  No open positions.")
+            print(f"  {sym:<8} {pos['qty']:>6} @ ${pos['avg_entry']:.2f}  {pre}${pl:.2f}")
     print(f"{'=' * 50}\n")
 
 
 def cmd_backtest():
+    from broker import AlpacaBroker
+    from backtester import BacktestEngine
+
+    broker = AlpacaBroker()
+    bt = BacktestEngine()
+
     print(f"\n{'=' * 50}")
-    print(f"  QUICK ANALYSIS")
+    print(f"  BACKTEST")
     print(f"{'=' * 50}\n")
-    engine = Engine()
+
     for symbol in Config.WATCHLIST:
         try:
-            signal = engine.analyze_symbol(symbol)
-            print(signal.summary())
-            for name, r in signal.results.items():
-                d = r.get("details", {})
-                detail_str = "  ".join(f"{k}={v}" for k, v in d.items()
-                                       if k not in ("error", "updates"))
-                if detail_str:
-                    print(f"    {name}: {detail_str}")
-            print()
+            bars = broker.get_bars(symbol, timeframe="1Day", limit=200)
+            if bars.empty:
+                print(f"  {symbol}: No data")
+                continue
+            results = bt.run(bars, symbol)
+            print(f"  {symbol}: {results['total_trades']} trades | "
+                  f"WR {results.get('win_rate', 0):.0%} | "
+                  f"P/L ${results.get('total_pnl', 0):+,.2f} | "
+                  f"Sharpe {results.get('sharpe_ratio', 0)}")
         except Exception as e:
-            print(f"  {symbol}: Error - {e}\n")
+            print(f"  {symbol}: Error - {e}")
+    print()
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Six Filters. One Trade.")
-    parser.add_argument("--scan-once", action="store_true", help="Single scan")
+    parser = argparse.ArgumentParser(description="Trading Bot v2.0")
     parser.add_argument("--status", action="store_true", help="Account status")
-    parser.add_argument("--backtest", action="store_true", help="Quick analysis")
-    parser.add_argument("--telegram", action="store_true", help="Start with Telegram control")
+    parser.add_argument("--scan-once", action="store_true", help="Single scan")
+    parser.add_argument("--backtest", action="store_true", help="Run backtest")
+    parser.add_argument("--telegram", action="store_true", help="Telegram mode")
+    parser.add_argument("--api-only", action="store_true", help="API server only")
     args = parser.parse_args()
 
     setup_logging()
+    logger = logging.getLogger("bot.main")
 
     if not Config.validate():
         print("\n  API Keys nicht konfiguriert!")
-        print("  1. cp .env.example .env")
-        print("  2. Trage deine Alpaca Keys in .env ein")
-        print("  3. Starte erneut\n")
+        print("  Setze ALPACA_API_KEY und ALPACA_SECRET_KEY als Umgebungsvariablen.\n")
         sys.exit(1)
 
+    if Config.DATABASE_URL:
+        init_database()
+
     print()
     print("  +==========================================+")
-    print("  |   SIX FILTERS. ONE TRADE.               |")
-    print("  |   Quantitative Trading Engine v1.0       |")
+    print("  |   TRADING BOT v2.0                      |")
+    print("  |   Weighted Scoring + Adaptive Learning   |")
     print("  +==========================================+")
     print()
 
-    if args.telegram:
-        if not Config.TELEGRAM_TOKEN or Config.TELEGRAM_TOKEN == "your_telegram_bot_token_here":
-            print("  Telegram nicht konfiguriert!")
-            print("  Trage TELEGRAM_TOKEN und TELEGRAM_CHAT_ID in .env ein.")
-            print("  Siehe README fuer Anleitung.\n")
+    if args.api_only:
+        start_api_server()
+    elif args.telegram:
+        if not Config.TELEGRAM_TOKEN:
+            print("  TELEGRAM_TOKEN nicht gesetzt!\n")
             sys.exit(1)
+        api_thread = threading.Thread(target=start_api_server, daemon=True)
+        api_thread.start()
         from telegram_bot import TradingTelegramBot
         bot = TradingTelegramBot()
         bot.run()
     elif args.status:
         cmd_status()
     elif args.scan_once:
+        from engine import Engine
         Engine().scan_once()
     elif args.backtest:
         cmd_backtest()
     else:
+        api_thread = threading.Thread(target=start_api_server, daemon=True)
+        api_thread.start()
+        from engine import Engine
         Engine().run()
 
 

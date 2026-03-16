@@ -1,11 +1,6 @@
-"""
-Formula 3 — EV Gap Detection
-Vergleicht aktuellen Preis mit Fair Value (VWAP + Bollinger + EMA).
-Sucht Gaps wo Expected Value positiv ist.
-"""
-
 import numpy as np
 import pandas as pd
+
 from config import Config
 
 

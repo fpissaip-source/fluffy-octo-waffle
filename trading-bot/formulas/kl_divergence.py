@@ -1,11 +1,6 @@
-"""
-Formula 4 — KL-Divergence (Cross-Timeframe)
-Misst statistische Distanz zwischen kurz- und langfristigen Returns.
-Hohe Divergenz = Zeitrahmen aus dem Gleichgewicht = Opportunity.
-"""
-
 import numpy as np
 import pandas as pd
+
 from config import Config
 
 
@@ -48,10 +43,12 @@ def evaluate(bars: pd.DataFrame, **kwargs) -> dict:
     drift = "SHORT_OUTPERFORMS" if short_mean > long_mean else "SHORT_UNDERPERFORMS"
     bullish_reversion = short_mean < long_mean and kl_div > threshold
 
+    directional_signal = kl_div if bullish_reversion else -kl_div
+
     return {
         "name": "KL-Divergence",
-        "signal": round(kl_div, 4),
-        "passed": kl_div > threshold,
+        "signal": round(directional_signal, 4),
+        "passed": bullish_reversion and kl_div > threshold,
         "details": {
             "kl_divergence": round(kl_div, 4),
             "threshold": threshold,
