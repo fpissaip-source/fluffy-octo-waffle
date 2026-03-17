@@ -537,10 +537,9 @@ class TradeSignal:
             self.reason = "Mandatory filter failed: Kelly"
             return
 
-        # Stoikov ist informational — bestimmt Order-Typ, zaehlt nicht in Kaskade
-        # Kaskade: pruefe 7→6→5→4 (nur die 6 nicht-Stoikov-Filter), Gemini entscheidet am Ende
-        passed_count = sum(1 for name, r in self.results.items() if r["passed"] and name != "Stoikov")
-        total = len(self.results)
+        # Alle 7 Filter zählen in der Kaskade (inkl. Stoikov).
+        # Stoikov bestimmt ZUSÄTZLICH den Order-Typ (Limit vs Market).
+        passed_count = sum(1 for r in self.results.values() if r["passed"])
 
         if passed_count >= 7:
             self.cascade_level = 7
@@ -600,6 +599,16 @@ class Engine:
         self.trade_log: list[TradeSignal] = []
         self.position_highs: dict[str, float] = {}
         self._async_threads: list[threading.Thread] = []
+        # Telegram-Callback (optional): wird von TradingTelegramBot gesetzt
+        self.notify: Optional[callable] = None
+
+    def _tg(self, text: str):
+        """Sendet Telegram-Nachricht wenn Callback gesetzt ist."""
+        if self.notify:
+            try:
+                self.notify(text)
+            except Exception as e:
+                logger.warning(f"Telegram notify failed: {e}")
 
     def _async_gemini_autopsy(
         self,
@@ -654,6 +663,10 @@ class Engine:
                         f"[EXPRESS LANE → HOLD ✓] {signal.symbol}: Position wird gehalten "
                         f"({verdict['confidence']:.0%}) — {verdict['reason']}"
                     )
+                    self._tg(
+                        f"🟢 <b>GEMINI: HALTEN</b> — {signal.symbol}\n"
+                        f"({verdict['confidence']:.0%}) {verdict['reason']}"
+                    )
                 else:
                     logger.warning(
                         f"[EXPRESS LANE → SELL ✗] {signal.symbol}: Gemini sagt VERKAUFEN "
@@ -661,12 +674,22 @@ class Engine:
                         f"| Risiken: {verdict.get('risk_factors', [])}"
                     )
                     if self.broker.has_position(signal.symbol):
+                        exit_price = self.broker.get_latest_price(signal.symbol) or entry_price
                         self.broker.close_position(signal.symbol)
                         self.position_highs.pop(signal.symbol, None)
                         self.learner.record_exit(
                             signal.symbol,
-                            self.broker.get_latest_price(signal.symbol) or entry_price,
+                            exit_price,
                             f"Gemini SELL nach Express Lane: {verdict['reason']}",
+                        )
+                        pnl_pct = (exit_price - entry_price) / entry_price * 100 if entry_price > 0 else 0
+                        self._tg(
+                            f"🔴 <b>GEMINI: VERKAUFEN</b> — {signal.symbol}\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"Einstieg: ${entry_price:.2f} → Ausstieg: ${exit_price:.2f}\n"
+                            f"P/L: <b>{pnl_pct:+.2f}%</b>\n"
+                            f"Grund: {verdict['reason']}\n"
+                            + (f"Risiken: {', '.join(verdict.get('risk_factors', []))}" if verdict.get('risk_factors') else "")
                         )
                         logger.warning(f"[EXPRESS LANE → SELL ✗] {signal.symbol}: Position geschlossen")
                     else:
@@ -849,6 +872,21 @@ class Engine:
         logger.info(f"Gemini: {reasoning.get('probability_pct', round(reasoning['confidence']*100))}% — {reasoning['reason']}")
         logger.info(f"{'=' * 40}")
 
+        # ── PRE-TRADE Telegram Alert ──
+        passed_names  = [n for n, r in signal.results.items() if r["passed"]]
+        failed_names  = [n for n, r in signal.results.items() if not r["passed"]]
+        self._tg(
+            f"⚡ <b>SIGNAL: BUY {signal.qty}x {signal.symbol}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Kaskade: <b>{signal.cascade_label}</b>\n"
+            f"Regime:  {self.risk.regime.value}\n"
+            f"Preis:   ${price:.2f}\n"
+            f"Wert:    ~${signal.qty * price:,.0f}\n"
+            f"✅ {', '.join(passed_names)}\n"
+            + (f"❌ {', '.join(failed_names)}\n" if failed_names else "")
+            + f"<i>Order wird jetzt platziert...</i>"
+        )
+
         # Stoikov self-deciding: Limit-Order wenn Reservation Price verfuegbar
         stoikov_result = signal.results.get("Stoikov", {})
         stoikov_passed = stoikov_result.get("passed", False)
@@ -868,6 +906,22 @@ class Engine:
             signal.reason += f" -> Order {order_id}"
             self.trade_log.append(signal)
             self.position_highs[signal.symbol] = price
+
+            # ── ORDER PLACED Telegram Alert ──
+            order_type = "LIMIT" if (signal.results.get("Stoikov", {}).get("passed") and
+                                     signal.results.get("Stoikov", {}).get("details", {}).get("reservation_price")) \
+                         else "MARKET"
+            self._tg(
+                f"✅ <b>ORDER PLATZIERT</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"<b>BUY {signal.qty}x {signal.symbol}</b>  [{order_type}]\n"
+                f"Preis:   ${price:.2f}\n"
+                f"Wert:    ~${signal.qty * price:,.0f}\n"
+                f"Kaskade: {signal.cascade_label}\n"
+                f"Order-ID: <code>{order_id}</code>\n"
+                + ("🔄 <i>Gemini prüft async ob HOLD/SELL...</i>" if reasoning.get("raw_response") == "EXPRESS_LANE" else
+                   f"🤖 Gemini: {reasoning.get('probability_pct', 0)}% — {reasoning.get('reason', '')}")
+            )
 
             # ── Adaptive Learning: Record Entry ──
             formula_scores = {

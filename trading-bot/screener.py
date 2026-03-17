@@ -140,7 +140,7 @@ class SpikeSensor:
 
         wss = StockDataStream(Config.API_KEY, Config.SECRET_KEY)
 
-        async def on_bar(bar):
+        def on_bar(bar):
             try:
                 symbol = bar.symbol
                 close = float(bar.close)

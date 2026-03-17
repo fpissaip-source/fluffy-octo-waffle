@@ -252,6 +252,7 @@ class TradingTelegramBot:
         self.is_running = True
         self.is_paused = False
         self.engine = Engine()
+        self.engine.notify = self.send_sync   # Telegram-Callback direkt in Engine
         self.scan_thread = threading.Thread(target=self._scan_loop, daemon=True)
         self.scan_thread.start()
 
@@ -516,20 +517,6 @@ Antworte NUR mit JSON:
                 # Haupt-Scan (Watchlist + Spike-Symbole + Execute)
                 # scan_once übernimmt: exit_checks, watchlist, spike-merge, execute
                 spike_results = self.engine.scan_once(market_status)
-
-                # Trade-Alerts aus Engine trade_log (neue seit letztem Scan)
-                # (Engine sendet keine Telegram-Messages direkt, das macht der Loop hier)
-                for signal in self.engine.trade_log[-5:]:
-                    if signal.all_passed and signal.qty > 0:
-                        # Nur neue (letzten 5 Sekunden) alertieren
-                        age = (datetime.now() - signal.timestamp).total_seconds()
-                        if age < Config.SCAN_INTERVAL + 10:
-                            self.send_sync(
-                                f"🚨 <b>TRADE SIGNAL</b>\n\n"
-                                f"<b>BUY {signal.qty}x {signal.symbol}</b>\n"
-                                f"Kaskade: {signal.cascade_label}\n\n"
-                                f"{self._format_signal_text(signal)}"
-                            )
 
                 # Stop-Loss Nähe Warnung
                 positions = broker.get_positions()
