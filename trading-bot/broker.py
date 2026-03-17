@@ -12,6 +12,16 @@ from config import Config
 
 logger = logging.getLogger("bot.broker")
 
+CRYPTO_SYMBOLS = {"BTCUSD", "ETHUSD", "SOLUSD", "AVAXUSD", "LINKUSD"}
+
+
+def _alpaca_crypto(symbol: str) -> str:
+    """BTCUSD → BTC/USD (Alpaca crypto API-Format)."""
+    s = symbol.upper()
+    if s.endswith("USD") and s in CRYPTO_SYMBOLS:
+        return s[:-3] + "/USD"
+    return s
+
 
 class AlpacaBroker:
     def __init__(self):
@@ -68,8 +78,7 @@ class AlpacaBroker:
         end = datetime.now()
         start = end - timedelta(days=max(7, limit // 78 + 3))
 
-        crypto_symbols = {"BTCUSD", "ETHUSD", "SOLUSD", "AVAXUSD", "LINKUSD"}
-        is_crypto = symbol.upper() in crypto_symbols
+        is_crypto = symbol.upper() in CRYPTO_SYMBOLS
 
         kwargs = dict(
             start=start.strftime("%Y-%m-%d"),
@@ -78,7 +87,7 @@ class AlpacaBroker:
         )
 
         if is_crypto:
-            bars = self.api.get_crypto_bars(symbol, tf, **kwargs).df
+            bars = self.api.get_crypto_bars(_alpaca_crypto(symbol), tf, **kwargs).df
         else:
             kwargs["feed"] = "iex"
             bars = self.api.get_bars(symbol, tf, **kwargs).df
@@ -95,9 +104,8 @@ class AlpacaBroker:
 
     def get_latest_price(self, symbol: str) -> Optional[float]:
         try:
-            crypto_symbols = {"BTCUSD", "ETHUSD", "SOLUSD", "AVAXUSD", "LINKUSD"}
-            if symbol.upper() in crypto_symbols:
-                return float(self.api.get_latest_crypto_trade(symbol).price)
+            if symbol.upper() in CRYPTO_SYMBOLS:
+                return float(self.api.get_latest_crypto_trade(_alpaca_crypto(symbol)).price)
             return float(self.api.get_latest_trade(symbol).price)
         except Exception as e:
             logger.warning(f"Price failed {symbol}: {e}")
@@ -105,9 +113,8 @@ class AlpacaBroker:
 
     def get_snapshot(self, symbol: str) -> Optional[dict]:
         try:
-            crypto_symbols = {"BTCUSD", "ETHUSD", "SOLUSD", "AVAXUSD", "LINKUSD"}
-            if symbol.upper() in crypto_symbols:
-                snap = self.api.get_latest_crypto_bar(symbol)
+            if symbol.upper() in CRYPTO_SYMBOLS:
+                snap = self.api.get_latest_crypto_bar(_alpaca_crypto(symbol))
                 price = float(snap.c)
                 return {
                     "price": price,
