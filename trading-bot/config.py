@@ -37,15 +37,15 @@ class Config:
     TELEGRAM_TOKEN: str = os.getenv("TELEGRAM_TOKEN", "")
     TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
 
-    # ── OpenAI API (REQUIRED — Reasoning Layer vor jeder Order) ──
-    OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
+    # ── Google Gemini API (REQUIRED — Reasoning Layer vor jeder Order) ──
+    GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
 
     # ── LunarCrush (optional — Crypto Sentiment) ──
     LUNARCRUSH_API_KEY: str = os.getenv("LUNARCRUSH_API_KEY", "")
 
     # ── Reasoning Layer Einstellungen ──
-    REASONING_MODEL: str = "gpt-4o"
-    REASONING_MIN_CONFIDENCE: float = 0.65  # GPT-4o muss mind. 65% sicher sein
+    REASONING_MODEL: str = "gemini-2.0-flash"
+    REASONING_MIN_CONFIDENCE: float = 0.65  # Gemini muss mind. 65% sicher sein
     REASONING_TIMEOUT: int = 20
 
     @classmethod
@@ -58,6 +58,6 @@ class Config:
             return False
         if not cls.SECRET_KEY or cls.SECRET_KEY == "your_paper_secret_key_here":
             return False
-        if not cls.OPENAI_API_KEY:
-            raise RuntimeError("OPENAI_API_KEY fehlt in .env — Reasoning Layer nicht verfuegbar. Bot gestoppt.")
+        if not cls.GEMINI_API_KEY:
+            raise RuntimeError("GEMINI_API_KEY fehlt in .env — Reasoning Layer nicht verfuegbar. Bot gestoppt.")
         return True

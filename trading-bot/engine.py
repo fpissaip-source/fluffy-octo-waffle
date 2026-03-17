@@ -1,7 +1,7 @@
 """
 engine.py — Drei-Schichten-Architektur:
   Schicht 1 (Perception):  7 quantitative Formeln scannen den Markt
-  Schicht 2 (Reasoning):   GPT-4o entscheidet PFLICHTWEISE vor jeder Order
+  Schicht 2 (Reasoning):   Gemini entscheidet PFLICHTWEISE vor jeder Order
   Schicht 3 (Execution):   Alpaca fuehrt Order aus
 
 24/7 Modus:
@@ -34,21 +34,21 @@ logger = logging.getLogger("bot.engine")
 
 
 # ═══════════════════════════════════════════════════════
-#  SCHICHT 2: REASONING LAYER (GPT-4o)
+#  SCHICHT 2: REASONING LAYER (Gemini)
 # ═══════════════════════════════════════════════════════
 
 class ReasoningLayer:
     """
     Pflicht-Entscheidungsschicht vor jeder Kauforder.
-    GPT-4o bekommt alle Perception-Daten und entscheidet:
+    Gemini bekommt alle Perception-Daten und entscheidet:
       - BUY:  Handel erlaubt
       - HOLD: Handel blockiert
-    Ohne gueltige GPT-4o-Bestaetigung wird KEINE Order ausgefuehrt.
+    Ohne gueltige Gemini-Bestaetigung wird KEINE Order ausgefuehrt.
     """
 
     def __init__(self):
-        from openai import OpenAI
-        self.client = OpenAI(api_key=Config.OPENAI_API_KEY)
+        from google import genai
+        self.client = genai.Client(api_key=Config.GEMINI_API_KEY)
         self.model = Config.REASONING_MODEL
         self.min_confidence = Config.REASONING_MIN_CONFIDENCE
         self.market_ctx = MarketContext()
@@ -63,7 +63,7 @@ class ReasoningLayer:
         regime: str,
     ) -> dict:
         """
-        Fragt GPT-4o ob der Trade ausgefuehrt werden soll.
+        Fragt Gemini ob der Trade ausgefuehrt werden soll.
         Returns: {"approved": bool, "confidence": float, "reason": str}
         """
         formula_summary = "\n".join(
@@ -114,14 +114,17 @@ Antworte NUR mit JSON:
 {{"decision": "BUY" oder "HOLD", "probability_pct": 0-100, "confidence": 0.0-1.0, "reason": "ein Satz auf Deutsch", "risk_factors": ["Faktor1", "Faktor2"]}}"""
 
         try:
-            response = self.client.chat.completions.create(
+            from google.genai import types as genai_types
+            response = self.client.models.generate_content(
                 model=self.model,
-                max_tokens=200,
-                temperature=0.1,
-                messages=[{"role": "user", "content": prompt}],
-                timeout=Config.REASONING_TIMEOUT,
+                contents=prompt,
+                config=genai_types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.1,
+                    max_output_tokens=200,
+                ),
             )
-            text = response.choices[0].message.content or ""
+            text = response.text or ""
 
             import re
             match = re.search(r'\{[^{}]+\}', text, re.DOTALL)
@@ -149,24 +152,24 @@ Antworte NUR mit JSON:
             return {"approved": False, "confidence": 0.0, "reason": "JSON parse error", "risk_factors": []}
 
         except Exception as e:
-            logger.error(f"[REASONING] {symbol}: GPT-4o Fehler — Trade BLOCKIERT: {e}")
+            logger.error(f"[REASONING] {symbol}: Gemini Fehler — Trade BLOCKIERT: {e}")
             return {"approved": False, "confidence": 0.0, "reason": f"API error: {e}", "risk_factors": []}
 
 
 # ═══════════════════════════════════════════════════════
-#  DYNAMISCHE WATCHLIST (GPT-4o findet neue Aktien)
+#  DYNAMISCHE WATCHLIST (Gemini findet neue Aktien)
 # ═══════════════════════════════════════════════════════
 
 class WatchlistDiscovery:
     """
-    Nutzt GPT-4o um alle 4 Stunden neue handelbare Aktien zu finden.
+    Nutzt Gemini um alle 4 Stunden neue handelbare Aktien zu finden.
     Kombiniert mit der Basis-Watchlist aus .env.
     Max 15 Symbole gesamt.
     """
 
     def __init__(self):
-        from openai import OpenAI
-        self.client = OpenAI(api_key=Config.OPENAI_API_KEY)
+        from google import genai
+        self.client = genai.Client(api_key=Config.GEMINI_API_KEY)
         self.last_update = 0
         self.update_interval = 3600  # alle 1 Stunde
         self.dynamic_symbols: list[str] = []
@@ -176,7 +179,7 @@ class WatchlistDiscovery:
         return time.time() - self.last_update > self.update_interval
 
     def discover(self, market_open: bool) -> list[str]:
-        """Fragt GPT-4o nach den besten Symbolen fuer die naechsten Stunden."""
+        """Fragt Gemini nach den besten Symbolen fuer die naechsten Stunden."""
         if not self.should_update():
             return self.dynamic_symbols
 
@@ -203,13 +206,17 @@ Antworte NUR mit JSON:
 {{"symbols": ["SYM1", "SYM2", "SYM3", "SYM4", "SYM5", "SYM6", "SYM7", "SYM8"], "reasoning": "ein Satz"}}"""
 
         try:
-            response = self.client.chat.completions.create(
-                model="gpt-4o",
-                max_tokens=200,
-                temperature=0.3,
-                messages=[{"role": "user", "content": prompt}],
+            from google.genai import types as genai_types
+            response = self.client.models.generate_content(
+                model=self.model if hasattr(self, "model") else Config.REASONING_MODEL,
+                contents=prompt,
+                config=genai_types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.3,
+                    max_output_tokens=200,
+                ),
             )
-            text = response.choices[0].message.content or ""
+            text = response.text or ""
             import re
             match = re.search(r'\{.*\}', text, re.DOTALL)
             if match:
@@ -226,7 +233,7 @@ Antworte NUR mit JSON:
 
     def get_active_watchlist(self, market_open: bool) -> list[str]:
         """
-        Kombiniert Basis-Watchlist (.env) mit GPT-4o Vorschlaegen.
+        Kombiniert Basis-Watchlist (.env) mit Gemini Vorschlaegen.
         Nachts/Wochenende: nur Crypto-Symbole.
         """
         dynamic = self.discover(market_open)
@@ -274,7 +281,7 @@ class TradeSignal:
             self.reason = "Mandatory filter failed: Kelly"
             return
 
-        # Kaskade: pruefe 7→6→5→4, GPT-4o entscheidet am Ende
+        # Kaskade: pruefe 7→6→5→4, Gemini entscheidet am Ende
         passed_count = sum(1 for r in self.results.values() if r["passed"])
         total = len(self.results)
 
@@ -294,14 +301,14 @@ class TradeSignal:
             self.all_passed = False
             self.action = "HOLD"
             failed = [n for n, r in self.results.items() if not r["passed"]]
-            self.reason = f"Zu schwach: nur {passed_count}/{total} — GPT-4o nicht befragt. Failed: {', '.join(failed)}"
+            self.reason = f"Zu schwach: nur {passed_count}/{total} — Gemini nicht befragt. Failed: {', '.join(failed)}"
             return
 
-        # Ab 4/7 + Kelly ✓ → GPT-4o entscheidet
+        # Ab 4/7 + Kelly ✓ → Gemini entscheidet
         self.all_passed = True
         self.action = "BUY"
         failed = [n for n, r in self.results.items() if not r["passed"]]
-        self.reason = f"{self.cascade_label} → GPT-4o befragt" + (f" | Offen: {', '.join(failed)}" if failed else "")
+        self.reason = f"{self.cascade_label} → Gemini befragt" + (f" | Offen: {', '.join(failed)}" if failed else "")
 
     def summary(self) -> str:
         lines = [
@@ -315,7 +322,7 @@ class TradeSignal:
             lines.append(f"  {name:<16} {status:<8} signal={r['signal']}")
         lines.append(f"{'-' * 60}")
         if self.all_passed:
-            lines.append(f"  LAYER 2: REASONING  -> GPT-4o entscheidet...")
+            lines.append(f"  LAYER 2: REASONING  -> Gemini entscheidet...")
             lines.append(f"  LAYER 3: EXECUTION  -> Qty: {self.qty}")
         else:
             lines.append(f"  > HOLD (Perception Layer blockiert)")
@@ -453,7 +460,7 @@ class Engine:
         max_qty = self.risk.max_position_size(equity, price)
         signal.qty = min(signal.qty, max_qty)
 
-        # ── SCHICHT 2: Reasoning Layer (GPT-4o Pflicht-Check) ──
+        # ── SCHICHT 2: Reasoning Layer (Gemini Pflicht-Check) ──
         reasoning = self.reasoning.approve_trade(
             symbol=signal.symbol,
             signal=signal,
@@ -475,7 +482,7 @@ class Engine:
         logger.info(f"{'=' * 40}")
         logger.info(f"EXECUTING: BUY {signal.qty}x {signal.symbol}")
         logger.info(f"Regime: {self.risk.regime.value} | {self.risk.params['description']}")
-        logger.info(f"GPT-4o: {reasoning.get('probability_pct', round(reasoning['confidence']*100))}% Wahrscheinlichkeit — {reasoning['reason']}")
+        logger.info(f"Gemini: {reasoning.get('probability_pct', round(reasoning['confidence']*100))}% Wahrscheinlichkeit — {reasoning['reason']}")
         logger.info(f"{'=' * 40}")
 
         order_id = self.broker.market_buy(signal.symbol, signal.qty)
@@ -590,10 +597,10 @@ class Engine:
 
     def run(self):
         logger.info("=" * 60)
-        logger.info("  7 FILTERS. GPT-4o REASONING. 24/7.")
+        logger.info("  7 FILTERS. Gemini REASONING. 24/7.")
         logger.info(f"  Mode: {'PAPER' if Config.is_paper() else '!! LIVE !!'}")
         logger.info(f"  Base Watchlist: {Config.WATCHLIST}")
-        logger.info(f"  Dynamic Discovery: alle 1h via GPT-4o")
+        logger.info(f"  Dynamic Discovery: alle 1h via Gemini")
         logger.info("=" * 60)
 
         while True:

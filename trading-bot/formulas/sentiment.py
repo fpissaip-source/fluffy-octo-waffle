@@ -4,7 +4,7 @@ sentiment.py — Multimodale Sentiment-Analyse
 Drei Ebenen (alle Pflicht):
 1. Alpaca News API — Echtzeit-Nachrichten pro Symbol
 2. Keyword-Scoring — schnelle Sentiment-Bewertung
-3. OpenAI GPT-4o — Deep Analysis (IMMER aktiv, kein Fallback)
+3. Google Gemini — Deep Analysis (IMMER aktiv, kein Fallback)
 
 Output: Sentiment-Score von -1.0 (extrem bearish) bis +1.0 (extrem bullish)
 """
@@ -218,27 +218,27 @@ class KeywordScorer:
 
 
 # ═══════════════════════════════════════════════════════
-#  OPENAI DEEP ANALYSIS (optional)
+#  GEMINI DEEP ANALYSIS (optional)
 # ═══════════════════════════════════════════════════════
 
-class OpenAIAnalyzer:
+class GeminiAnalyzer:
     """
-    Nutzt OpenAI GPT-4o fuer tiefere Sentiment-Analyse.
+    Nutzt Google Gemini fuer tiefere Sentiment-Analyse.
     Nur fuer kritische Momente (spart API-Kosten).
 
-    Erfordert OPENAI_API_KEY in .env
+    Erfordert GEMINI_API_KEY in .env
     """
 
     def __init__(self):
-        self.api_key = Config.OPENAI_API_KEY
+        self.api_key = Config.GEMINI_API_KEY
         if not self.api_key:
-            raise RuntimeError("OPENAI_API_KEY fehlt — Sentiment Analysis nicht moeglich")
+            raise RuntimeError("GEMINI_API_KEY fehlt — Sentiment Analysis nicht moeglich")
         self.last_call = 0
         self.min_interval = 60  # Max 1 Call pro Minute
 
     def analyze(self, headlines: list[str], symbol: str) -> Optional[dict]:
         """
-        Fragt GPT-4o nach einer Einschaetzung.
+        Fragt Gemini nach einer Einschaetzung.
         Gibt Score (-1 bis +1) und Begruendung zurueck.
         """
         if not headlines:
@@ -250,36 +250,42 @@ class OpenAIAnalyzer:
             return None
 
         try:
-            from openai import OpenAI
+            from google import genai
+            from google.genai import types as genai_types
             import json
 
-            client = OpenAI(api_key=self.api_key)
+            client = genai.Client(api_key=self.api_key)
             news_text = "\n".join(f"- {h}" for h in headlines[:10])
 
-            response = client.chat.completions.create(
-                model="gpt-4o",
-                max_tokens=300,
-                messages=[{"role": "user", "content": (
-                    f"Analyze these headlines for {symbol} stock sentiment.\n\n"
-                    f"{news_text}\n\n"
-                    f"Respond ONLY with JSON:\n"
-                    f'{{"score": <-1.0 to 1.0>, "confidence": <0 to 1>, '
-                    f'"reason": "<one sentence>"}}'
-                )}],
+            prompt = (
+                f"Analyze these headlines for {symbol} stock sentiment.\n\n"
+                f"{news_text}\n\n"
+                f"Respond ONLY with JSON:\n"
+                f'{{"score": <-1.0 to 1.0>, "confidence": <0 to 1>, '
+                f'"reason": "<one sentence>"}}'
+            )
+
+            response = client.models.generate_content(
+                model=Config.REASONING_MODEL,
+                contents=prompt,
+                config=genai_types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    max_output_tokens=300,
+                ),
             )
 
             self.last_call = time.time()
-            text = response.choices[0].message.content or ""
+            text = response.text or ""
             match = re.search(r'\{[^}]+\}', text)
             if match:
                 result = json.loads(match.group())
-                logger.info(f"OpenAI analysis {symbol}: score={result.get('score')} "
+                logger.info(f"Gemini analysis {symbol}: score={result.get('score')} "
                             f"reason={result.get('reason', '')[:60]}")
                 return result
             return None
 
         except Exception as e:
-            logger.warning(f"OpenAI analysis failed: {e}")
+            logger.warning(f"Gemini analysis failed: {e}")
             return None
 
 
@@ -292,7 +298,7 @@ class SentimentEngine:
     Kombiniert alle Sentiment-Quellen:
     1. Symbol-spezifische News (Alpaca)
     2. Makro-News (Markt allgemein)
-    3. Optional: OpenAI GPT-4o Deep Analysis
+    3. Optional: Google Gemini Deep Analysis
 
     Output wird als Signal in den Bayesian Updater gespeist.
     """
@@ -300,7 +306,7 @@ class SentimentEngine:
     def __init__(self, broker):
         self.news_fetcher = NewsFetcher(broker)
         self.scorer = KeywordScorer()
-        self.openai = OpenAIAnalyzer()
+        self.gemini = GeminiAnalyzer()
 
         # Cache um API-Calls zu reduzieren
         self._cache: dict = {}
@@ -343,17 +349,17 @@ class SentimentEngine:
         macro_articles = self.news_fetcher.get_market_news(limit=10)
         macro_sentiment = self.scorer.score_articles(macro_articles, is_macro=True)
 
-        # ── 3. OpenAI (nur wenn Score unklar oder extreme News) ──
-        openai_result = None
+        # ── 3. Gemini (nur wenn Score unklar oder extreme News) ──
+        gemini_result = None
         headlines = [a["headline"] for a in articles]
         if headlines and abs(symbol_sentiment["score"]) > 0.3:
-            openai_result = self.openai.analyze(headlines, symbol)
+            gemini_result = self.gemini.analyze(headlines, symbol)
 
         # ── Kombination ──
-        # Gewichtung: Symbol-News 50%, Makro 30%, OpenAI 20%
+        # Gewichtung: Symbol-News 50%, Makro 30%, Gemini 20%
         combined = symbol_sentiment["score"] * 0.50 + macro_sentiment["score"] * 0.30
-        if openai_result and "score" in openai_result:
-            combined += openai_result["score"] * 0.20
+        if gemini_result and "score" in gemini_result:
+            combined += gemini_result["score"] * 0.20
         else:
             combined += symbol_sentiment["score"] * 0.20
 
@@ -365,7 +371,7 @@ class SentimentEngine:
             confidence += 0.1
         if macro_sentiment["article_count"] > 3:
             confidence += 0.1
-        if openai_result:
+        if gemini_result:
             confidence += 0.2
         confidence = min(confidence, 1.0)
 
@@ -374,7 +380,7 @@ class SentimentEngine:
             "confidence": round(confidence, 2),
             "symbol_sentiment": symbol_sentiment,
             "macro_sentiment": macro_sentiment,
-            "openai_analysis": openai_result,
+            "gemini_analysis": gemini_result,
             "article_count": symbol_sentiment["article_count"] + macro_sentiment["article_count"],
         }
 
@@ -438,7 +444,7 @@ def evaluate(bars=None, broker=None, symbol: str = "", **kwargs) -> dict:
                 "articles": result["article_count"],
                 "macro": result["macro_sentiment"]["score"],
                 "symbol_news": result["symbol_sentiment"]["score"],
-                "openai": result["openai_analysis"] is not None,
+                "gemini": result["gemini_analysis"] is not None,
                 "top_signals": (
                     result["symbol_sentiment"]["details"][:3]
                     if result["symbol_sentiment"]["details"]
