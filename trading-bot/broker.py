@@ -76,7 +76,11 @@ class AlpacaBroker:
         }
         tf = tf_map.get(timeframe, tradeapi.TimeFrame(5, tradeapi.TimeFrameUnit.Minute))
         end = datetime.now()
-        start = end - timedelta(days=max(7, limit // 78 + 3))
+        # Korrekte Tagesberechnung je nach Timeframe (war: immer limit//78 = 5Min-Formel)
+        _bars_per_day = {"1Min": 390, "5Min": 78, "15Min": 26, "1Hour": 7, "1Day": 1}
+        _bpd = _bars_per_day.get(timeframe, 78)
+        # x2 für Wochenenden/Feiertage, mindestens 14 Tage Puffer
+        start = end - timedelta(days=max(14, (limit // _bpd + 3) * 2))
 
         is_crypto = symbol.upper() in CRYPTO_SYMBOLS
 

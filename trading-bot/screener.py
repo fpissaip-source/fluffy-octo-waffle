@@ -33,50 +33,48 @@ class SpikeSensor:
       sensor.scan() → list[str] der erkannten Spike-Symbole
     """
 
-    # Breites Universum: ~300 volatile Small/Micro Caps, Biotech, Meme, EV, Crypto-Proxies
+    # Breites Universum: volatile Small/Mid Caps, Biotech, Meme, EV, Crypto-Proxies
+    # Bereinigt: delisted/bankrotte Stocks entfernt (BBBY, RIDE, GOEV, HYLN, HEXO,
+    # TTOO, BBIG, MULN, ENDP, MILE/METROMILE, NAVB, SOLO, XELA, WISH, VIEW, AYRO,
+    # SUNW/NOVA/FSR (bankruptcy), EXPR, KOSS, PHUN, NXGL, GFAI, DPSI, LIQT)
     UNIVERSE = [
         # ── Meme / Reddit ──────────────────────────────────────
-        "AMC", "GME", "BBBY", "KOSS", "EXPR", "BB", "NOK", "SPCE",
+        "AMC", "GME", "BB", "NOK", "SPCE",
         # ── Biotech / Pharma ───────────────────────────────────
-        "OCGN", "NVAX", "INO", "SRNE", "ATOS", "VXRT", "IOVA", "SAVA",
-        "CRSP", "EDIT", "NTLA", "BEAM", "VERV", "HOOK", "FREQ", "AMRN",
-        "MNKD", "ADMA", "OTIC", "NAVB", "CPRX", "PRGO", "IRWD", "ENDP",
-        "DARE", "CLRB", "TTOO", "INPX", "CLPS", "KOPN", "VUZI",
-        "AGEN", "SURF", "PHUN", "PRME", "SUPN", "NKTR", "ACAD",
+        "OCGN", "NVAX", "INO", "SRNE", "VXRT", "IOVA", "SAVA",
+        "CRSP", "EDIT", "NTLA", "BEAM", "VERV", "AMRN",
+        "MNKD", "ADMA", "CPRX", "PRGO", "IRWD",
+        "DARE", "CLRB", "INPX", "CLPS", "KOPN", "VUZI",
+        "AGEN", "SURF", "PRME", "SUPN", "NKTR", "ACAD",
         # ── EV / Wasserstoff / Clean Energy ───────────────────
-        "NKLA", "GOEV", "RIDE", "WKHS", "AYRO", "HYLN", "FSR",
-        "PLUG", "FCEL", "BLNK", "CHPT", "QS", "LCID", "RIVN",
-        "SPWR", "SUNW", "NOVA", "RUN", "ARRY", "STEM",
+        "NKLA", "WKHS", "PLUG", "FCEL", "BLNK", "CHPT", "QS", "LCID", "RIVN",
+        "SPWR", "RUN", "ARRY", "STEM",
         # ── Crypto-Proxies ─────────────────────────────────────
-        "MARA", "RIOT", "BTBT", "SOS", "NCTY", "MOGO", "EBON",
-        "CAN", "HUT", "CIFR", "BTDR", "CORZ",
+        "MARA", "RIOT", "BTBT", "SOS", "MOGO",
+        "HUT", "CIFR", "BTDR", "CORZ",
         # ── Cannabis ───────────────────────────────────────────
-        "SNDL", "APHA", "TLRY", "ACB", "CGC", "CRON", "HEXO",
+        "SNDL", "TLRY", "ACB", "CGC", "CRON",
         "OGI", "GRWG", "IIPR",
         # ── Fintech / Meme Finance ─────────────────────────────
         "SOFI", "UPST", "AFRM", "HOOD", "COIN", "OPEN", "DKNG",
-        "PENN", "SKLZ", "RBLX", "CLOV", "WISH",
+        "PENN", "RBLX",
         # ── Tech Small Caps ────────────────────────────────────
-        "MVIS", "IDEX", "HIMS", "NNDM", "PLBY", "GNUS", "PRED",
-        "SOLO", "XELA", "CTRM", "SHIP", "FREE", "IMPP", "ZOM",
-        "PHGE", "CIDM", "CELZ", "IMVT", "ALDX", "RETA", "NVAX",
+        "MVIS", "IDEX", "HIMS", "NNDM", "GNUS",
+        "CTRM", "SHIP", "FREE", "IMPP",
+        "IMVT", "ALDX", "RETA",
         # ── Energy / Oil Micro ─────────────────────────────────
-        "BORR", "TELL", "NEXT", "HLTH", "AMTX", "REI", "IMPP",
-        # ── SPACs / Recent IPOs ────────────────────────────────
-        "PSFE", "SKLZ", "VIEW", "VELO", "GRNV",
+        "BORR", "TELL", "AMTX", "REI",
         # ── Volatile Mid-Caps mit Momentum ────────────────────
-        "RKT", "OPEN", "OFFERPAD", "IRBT", "VZIO", "ANGI",
-        "LMND", "ROOT", "HIPPO", "MILE", "METROMILE",
+        "RKT", "IRBT", "ANGI", "LMND", "ROOT",
         # ── Short-Squeeze Kandidaten ───────────────────────────
-        "PRTY", "VSTO", "SCVL", "PAYA", "OLBG", "HRTX", "ACET",
+        "PRTY", "VSTO", "SCVL", "HRTX", "ACET",
         "NUVB", "AEYE", "SKIN", "BKSY", "SPIR", "OSAT",
         # ── Biotech mit nahen Katalysatoren ───────────────────
-        "FATE", "RGEN", "ARWR", "PTGX", "YMAB", "IMCR", "TGTX",
-        "KRTX", "RXDX", "ARVN", "KDNY", "RCKT", "ALLO",
-        "CABA", "MGTX", "RAPT", "NRIX", "PRAX", "FOLD",
-        # ── OTC / Micro Cap (handelbar via Alpaca) ─────────────
-        "TNXP", "JAGX", "GFAI", "MULN", "BBIG", "PHUN",
-        "NXGL", "LIQT", "LGVN", "TPVG", "DPSI",
+        "FATE", "RGEN", "ARWR", "PTGX", "IMCR", "TGTX",
+        "KRTX", "RXDX", "ARVN", "RCKT", "ALLO",
+        "MGTX", "RAPT", "NRIX", "PRAX", "FOLD",
+        # ── Micro Cap (handelbar via Alpaca) ───────────────────
+        "TNXP", "JAGX", "LGVN", "TPVG",
     ]
 
     def __init__(self, broker: "AlpacaBroker"):
