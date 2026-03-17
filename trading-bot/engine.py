@@ -126,10 +126,23 @@ Antworte NUR mit JSON:
             )
             text = response.text or ""
 
-            import re
-            match = re.search(r'\{[^{}]+\}', text, re.DOTALL)
-            if match:
-                result = json.loads(match.group())
+            # Extrahiere äußerstes JSON-Objekt (unterstützt verschachtelte Strukturen)
+            result = None
+            depth, start = 0, None
+            for i, c in enumerate(text):
+                if c == '{':
+                    if depth == 0:
+                        start = i
+                    depth += 1
+                elif c == '}':
+                    depth -= 1
+                    if depth == 0 and start is not None:
+                        try:
+                            result = json.loads(text[start:i + 1])
+                        except json.JSONDecodeError:
+                            pass
+                        break
+            if result:
                 approved = (
                     result.get("decision", "HOLD") == "BUY"
                     and float(result.get("confidence", 0)) >= self.min_confidence
@@ -217,10 +230,22 @@ Antworte NUR mit JSON:
                 ),
             )
             text = response.text or ""
-            import re
-            match = re.search(r'\{.*\}', text, re.DOTALL)
-            if match:
-                result = json.loads(match.group())
+            result = None
+            depth, start = 0, None
+            for i, c in enumerate(text):
+                if c == '{':
+                    if depth == 0:
+                        start = i
+                    depth += 1
+                elif c == '}':
+                    depth -= 1
+                    if depth == 0 and start is not None:
+                        try:
+                            result = json.loads(text[start:i + 1])
+                        except json.JSONDecodeError:
+                            pass
+                        break
+            if result:
                 symbols = [s.upper().strip() for s in result.get("symbols", [])]
                 self.dynamic_symbols = symbols[:8]
                 self.last_update = time.time()
