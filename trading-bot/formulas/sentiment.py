@@ -271,6 +271,7 @@ class GeminiAnalyzer:
                 config=genai_types.GenerateContentConfig(
                     response_mime_type="application/json",
                     max_output_tokens=300,
+                    thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
                 ),
             )
 
