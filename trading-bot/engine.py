@@ -629,9 +629,14 @@ class TradeSignal:
             self.reason = f"Only {len(self.results)}/7 formulas ran"
             return
 
-        # Kelly zählt als normaler Filter (1/7), kein Mandatory-Block mehr.
-        # Kelly=0.0 war strukturell immer False (random walk nach Kostenabzug),
-        # daher hat er jeden Trade blockiert. Sizing läuft weiterhin über Kelly.
+        # Kelly ist Mandatory-Filter: kein Trade ohne positiven Expected Value.
+        # 1-Hour-Bars geben Kelly den Weitwinkel-Blick für Swing-Trades.
+        kelly_result = self.results.get("Kelly")
+        if kelly_result and not kelly_result["passed"]:
+            self.all_passed = False
+            self.action = "HOLD"
+            self.reason = "Kelly FAIL (Mandatory-Block) — kein positiver EV"
+            return
 
         # Alle 7 Filter zählen in der Kaskade (inkl. Stoikov).
         # Stoikov bestimmt ZUSÄTZLICH den Order-Typ (Limit vs Market).
