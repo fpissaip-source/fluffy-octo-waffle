@@ -13,6 +13,7 @@ Befehle:
     /pause        - Bot pausieren
     /resume       - Bot fortsetzen
     /stop         - Bot komplett stoppen
+    /screener     - Top-Mover Screener (penny/micro/sub)
 """
 
 import asyncio
@@ -93,6 +94,11 @@ class TradingTelegramBot:
             "/stats   — Performance-Stats\n"
             "/weights — Gelernte Gewichte\n"
             "/trades  — Heutige Trades\n\n"
+            "<b>Screener:</b>\n"
+            "/screener       — Top-Mover (alle)\n"
+            "/screener penny — Penny Stocks &lt;$5\n"
+            "/screener micro — unter $1\n"
+            "/screener sub   — Sub-Penny &lt;$0.01\n\n"
             "<b>Watchlist:</b>\n"
             "/watchlist — Symbole anzeigen\n"
             "/add TSLA — Hinzufuegen\n"
@@ -352,6 +358,86 @@ class TradingTelegramBot:
         except Exception as e:
             await update.message.reply_text(f"Error: {e}")
 
+    async def cmd_screener(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Screener: Top-Mover nach Kategorie (penny/micro/sub)."""
+        await update.message.reply_text("🔍 Screener läuft...")
+
+        mode = context.args[0].lower() if context.args else "all"
+
+        mode_config = {
+            "penny": {"label": "Penny Stocks (<$5)", "max_price": 5.0},
+            "micro": {"label": "Micro Stocks (<$1)", "max_price": 1.0},
+            "sub":   {"label": "Sub-Penny (<$0.01)", "max_price": 0.01},
+            "all":   {"label": "Top-Mover (alle)", "max_price": None},
+        }
+        cfg = mode_config.get(mode, mode_config["all"])
+
+        price_filter = (
+            f"Nur Aktien mit Kurs unter ${cfg['max_price']} USD."
+            if cfg["max_price"]
+            else "Alle Preisbereiche erlaubt."
+        )
+
+        prompt = f"""Du bist ein Day-Trader-Screener. {price_filter}
+Welche 10 US-Aktien haben HEUTE das höchste Momentum und relatives Volumen (mind. 3x Durchschnitt)?
+Fokus auf: starke News-Katalysatoren, Short Squeeze, FDA, Earnings heute.
+Antworte NUR mit JSON:
+{{"results": [{{"symbol": "SYM", "price_est": 1.23, "catalyst": "kurzer Grund", "volume_mult": 4.5}}]}}"""
+
+        try:
+            import json
+            from google import genai
+            from google.genai import types as genai_types
+
+            client = genai.Client(api_key=Config.GEMINI_API_KEY)
+            response = client.models.generate_content(
+                model=Config.REASONING_MODEL,
+                contents=prompt,
+                config=genai_types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.3,
+                    max_output_tokens=500,
+                ),
+            )
+            text = response.text or ""
+            result = None
+            depth, start = 0, None
+            for i, c in enumerate(text):
+                if c == '{':
+                    if depth == 0:
+                        start = i
+                    depth += 1
+                elif c == '}':
+                    depth -= 1
+                    if depth == 0 and start is not None:
+                        try:
+                            result = json.loads(text[start:i + 1])
+                        except json.JSONDecodeError:
+                            pass
+                        break
+
+            if not result or not result.get("results"):
+                await update.message.reply_text("Keine Ergebnisse vom Screener.")
+                return
+
+            lines = [f"📊 <b>SCREENER — {cfg['label']}</b>", "━━━━━━━━━━━━━━━━━━━━━━"]
+            for r in result["results"][:10]:
+                sym = r.get("symbol", "?").upper()
+                price = r.get("price_est", 0)
+                catalyst = r.get("catalyst", "—")[:40]
+                vol = r.get("volume_mult", 0)
+                lines.append(
+                    f"\n<b>{sym}</b>  ~${price:.2f}  |  {vol:.1f}x Vol\n"
+                    f"  📌 {catalyst}"
+                )
+            lines.append(f"\n<i>Quelle: Gemini Echtzeit-Analyse</i>")
+            lines.append(f"/screener penny  /screener micro  /screener sub")
+
+            await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+        except Exception as e:
+            await update.message.reply_text(f"Screener Error: {e}")
+
     async def cmd_sentiment(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Sentiment-Analyse fuer ein Symbol oder die ganze Watchlist."""
         try:
@@ -519,6 +605,7 @@ class TradingTelegramBot:
         self.app.add_handler(CommandHandler("stats", self.cmd_stats))
         self.app.add_handler(CommandHandler("weights", self.cmd_weights))
         self.app.add_handler(CommandHandler("sentiment", self.cmd_sentiment))
+        self.app.add_handler(CommandHandler("screener", self.cmd_screener))
 
         logger.info("Telegram bot running. Send /start to begin.")
         self.app.run_polling(drop_pending_updates=True)
