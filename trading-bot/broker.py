@@ -235,14 +235,17 @@ class AlpacaBroker:
             return "open"
         now = datetime.now(timezone.utc)
         next_open = clock.next_open.replace(tzinfo=timezone.utc)
-        next_close = clock.next_close.replace(tzinfo=timezone.utc)
-        # Pre-market: 4h before open; After-hours: up to 4h after close
+        # Pre-market: 4:00–9:30 AM ET (5.5h vor Öffnung)
         pre_market_start = next_open - timedelta(hours=5.5)
-        # After-hours: market closed but within same trading day window
-        prev_close = next_close - timedelta(hours=6.5)
-        after_hours_end = prev_close + timedelta(hours=4)
         if pre_market_start <= now < next_open:
             return "extended"
-        if prev_close < now <= after_hours_end:
-            return "extended"
+        # After-hours: 16:00–20:00 ET, Mo–Fr
+        # Bug-Fix: prev_close = next_close - 6.5h zeigte auf NÄCHSTEN Montag,
+        # nicht auf den letzten Freitag → After-Hours wurde nie erkannt.
+        # Stattdessen: direkt per ET-Uhrzeit prüfen (UTC-4 = EDT, gilt ~7 Monate)
+        now_et = now - timedelta(hours=4)
+        if now_et.weekday() < 5:  # Mo–Fr
+            et_hour = now_et.hour + now_et.minute / 60
+            if 16.0 <= et_hour < 20.0:
+                return "extended"
         return "closed"
