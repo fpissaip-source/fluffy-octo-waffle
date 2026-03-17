@@ -361,7 +361,11 @@ class WatchlistDiscovery:
             candidates = []
             for symbol, snap in snaps.items():
                 try:
+                    # daily_bar ist bei Extended Hours / frühem Pre-Market oft None oder volume=0
+                    # → prev_daily_bar als Fallback damit nicht alle Kandidaten wegfallen
                     daily = snap.daily_bar
+                    if not daily or int(daily.volume) == 0:
+                        daily = getattr(snap, "prev_daily_bar", None)
                     if not daily:
                         continue
                     open_p = float(daily.open)
@@ -483,11 +487,14 @@ Antworte NUR mit JSON:
                 hallucinated = [s for s in raw_symbols if s not in candidate_set]
                 if hallucinated:
                     logger.warning(f"[WATCHLIST] Gemini halluzinierte {len(hallucinated)} Symbole → verworfen: {hallucinated}")
-                self.dynamic_symbols = validated[:15]
-                self.last_update = time.time()
-                logger.info(f"[WATCHLIST] Neue Symbole ({len(self.dynamic_symbols)}): {self.dynamic_symbols} | {result.get('reasoning', '')}")
-                self._add_top_favorite()
-                return self.dynamic_symbols
+                if validated:
+                    self.dynamic_symbols = validated[:15]
+                    self.last_update = time.time()
+                    logger.info(f"[WATCHLIST] Neue Symbole ({len(self.dynamic_symbols)}): {self.dynamic_symbols} | {result.get('reasoning', '')}")
+                    self._add_top_favorite()
+                    return self.dynamic_symbols
+                else:
+                    logger.warning("[WATCHLIST] Gemini: alle Symbole halluziniert → Alpaca-Fallback")
 
         except Exception as e:
             logger.warning(f"[WATCHLIST] Discovery fehlgeschlagen: {e}")
