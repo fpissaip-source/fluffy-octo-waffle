@@ -13,6 +13,7 @@ engine.py — Drei-Schichten-Architektur:
 import json
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -721,14 +722,33 @@ class Engine:
 
         self.check_exit_conditions()
 
-        for symbol in active_watchlist:
+        # Phase 1 — Parallel: Formel-Analyse + Alpaca-Daten für alle Symbole gleichzeitig
+        signals: list[TradeSignal] = [None] * len(active_watchlist)
+
+        def _analyze(idx_sym):
+            idx, sym = idx_sym
             try:
-                signal = self.analyze_symbol(symbol)
-                print(signal.summary())
-                if signal.all_passed:
-                    self.execute_signal(signal)
+                return idx, self.analyze_symbol(sym)
             except Exception as e:
-                logger.error(f"Error {symbol}: {e}")
+                logger.error(f"Error analyzing {sym}: {e}")
+                return idx, None
+
+        max_workers = min(len(active_watchlist), 8)
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {pool.submit(_analyze, (i, sym)): sym
+                       for i, sym in enumerate(active_watchlist)}
+            for future in as_completed(futures):
+                idx, signal = future.result()
+                if signal is not None:
+                    signals[idx] = signal
+
+        # Phase 2 — Sequenziell: Gemini Reasoning + Order-Ausführung
+        for signal in signals:
+            if signal is None:
+                continue
+            print(signal.summary())
+            if signal.all_passed:
+                self.execute_signal(signal)
 
         equity = self.broker.get_equity()
         positions = self.broker.get_positions()
