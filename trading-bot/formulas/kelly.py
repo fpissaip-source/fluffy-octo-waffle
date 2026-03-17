@@ -28,7 +28,12 @@ def evaluate(bars: pd.DataFrame, equity: float = 10000.0, **kwargs) -> dict:
     losses = returns[returns < 0]
     avg_gain = gains.mean() if len(gains) > 0 else 0.001
     avg_loss = abs(losses.mean()) if len(losses) > 0 else 0.001
-    payoff = min(avg_gain / avg_loss, 10.0)
+
+    # Slippage & Gebuehren abziehen (Kosten pro Seite: Kauf + Verkauf)
+    cost_pct = (Config.SLIPPAGE_BPS + Config.FEE_BPS) / 10000 * 2  # je Roundtrip
+    adj_gain = max(avg_gain - cost_pct, 0.0001)
+    adj_loss = avg_loss + cost_pct
+    payoff = min(adj_gain / adj_loss, 10.0)
 
     full_kelly = kelly_fraction(win_prob, payoff)
     adjusted = full_kelly * Config.KELLY_FRACTION
@@ -47,5 +52,6 @@ def evaluate(bars: pd.DataFrame, equity: float = 10000.0, **kwargs) -> dict:
             "final_pct": round(final_pct, 4),
             "bet_size_usd": round(bet_size, 2),
             "fraction_used": f"{Config.KELLY_FRACTION}x Kelly",
+            "cost_pct": f"{cost_pct*100:.3f}%",
         },
     }

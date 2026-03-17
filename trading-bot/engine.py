@@ -13,6 +13,7 @@ engine.py — Drei-Schichten-Architektur:
 import json
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -29,6 +30,7 @@ from adaptive import AdaptiveLearner
 from formulas import momentum, kelly, ev_gap, kl_divergence, bayesian, stoikov
 from formulas import sentiment as sentiment_formula
 from market_context import MarketContext
+from screener import SpikeSensor
 
 logger = logging.getLogger("bot.engine")
 
@@ -224,16 +226,33 @@ class WatchlistDiscovery:
     Max 15 Symbole gesamt.
     """
 
-    def __init__(self):
+    def __init__(self, broker=None):
         from google import genai
         self.client = genai.Client(api_key=Config.GEMINI_API_KEY)
         self.last_update = 0
-        self.update_interval = 3600  # alle 1 Stunde
+        self.update_interval = 900   # alle 15 Minuten (war 1h)
         self.dynamic_symbols: list[str] = []
+        self.broker = broker
         logger.info("[WATCHLIST] Dynamic discovery initialisiert")
 
     def should_update(self) -> bool:
         return time.time() - self.last_update > self.update_interval
+
+    def _verify_symbols(self, symbols: list[str]) -> list[str]:
+        """Prueft ob Gemini-Symbole wirklich auf Alpaca handelbar sind (Volumen > 0)."""
+        if not self.broker:
+            return symbols
+        verified = []
+        for sym in symbols:
+            try:
+                snap = self.broker.get_snapshot(sym)
+                if snap and snap.get("volume", 0) > 0:
+                    verified.append(sym)
+                else:
+                    logger.warning(f"[WATCHLIST] {sym} verworfen: kein Volumen auf Alpaca")
+            except Exception as e:
+                logger.warning(f"[WATCHLIST] {sym} verworfen: Snapshot fehlgeschlagen ({e})")
+        return verified
 
     def discover(self, market_status: str) -> list[str]:
         """Fragt Gemini nach den besten Symbolen fuer die naechsten Stunden."""
@@ -310,7 +329,10 @@ Antworte NUR mit JSON:
                             pass
                         break
             if result:
-                symbols = [s.upper().strip() for s in result.get("symbols", [])]
+                raw_symbols = [s.upper().strip() for s in result.get("symbols", [])]
+                symbols = self._verify_symbols(raw_symbols)
+                if len(symbols) < len(raw_symbols):
+                    logger.info(f"[WATCHLIST] Volumen-Filter: {len(raw_symbols)} → {len(symbols)} Symbole")
                 self.dynamic_symbols = symbols[:8]
                 self.last_update = time.time()
                 logger.info(f"[WATCHLIST] Neue Symbole: {self.dynamic_symbols} | {result.get('reasoning', '')}")
@@ -368,8 +390,9 @@ class TradeSignal:
             self.reason = "Mandatory filter failed: Kelly"
             return
 
-        # Kaskade: pruefe 7→6→5→4, Gemini entscheidet am Ende
-        passed_count = sum(1 for r in self.results.values() if r["passed"])
+        # Stoikov ist informational — bestimmt Order-Typ, zaehlt nicht in Kaskade
+        # Kaskade: pruefe 7→6→5→4 (nur die 6 nicht-Stoikov-Filter), Gemini entscheidet am Ende
+        passed_count = sum(1 for name, r in self.results.items() if r["passed"] and name != "Stoikov")
         total = len(self.results)
 
         if passed_count >= 7:
@@ -425,7 +448,8 @@ class Engine:
         self.risk = RiskManager()
         self.learner = AdaptiveLearner()
         self.reasoning = ReasoningLayer()
-        self.watchlist = WatchlistDiscovery()
+        self.watchlist = WatchlistDiscovery(self.broker)
+        self.spike_sensor = SpikeSensor(self.broker)
         self.trade_log: list[TradeSignal] = []
         self.position_highs: dict[str, float] = {}
 
@@ -572,7 +596,21 @@ class Engine:
         logger.info(f"Gemini: {reasoning.get('probability_pct', round(reasoning['confidence']*100))}% Wahrscheinlichkeit — {reasoning['reason']}")
         logger.info(f"{'=' * 40}")
 
-        order_id = self.broker.market_buy(signal.symbol, signal.qty)
+        # Stoikov self-deciding: Limit-Order wenn Reservation Price verfuegbar
+        stoikov_result = signal.results.get("Stoikov", {})
+        stoikov_passed = stoikov_result.get("passed", False)
+        reservation_price = stoikov_result.get("details", {}).get("reservation_price")
+        market_status = self.broker.get_market_status()
+
+        if stoikov_passed and reservation_price and reservation_price > 0 and market_status == "open":
+            logger.info(
+                f"[STOIKOV] {signal.symbol}: Limit-Order @ ${reservation_price:.2f} "
+                f"(Reservation Price — besser als Market)"
+            )
+            order_id = self.broker.limit_buy(signal.symbol, signal.qty, reservation_price)
+        else:
+            # Market-Order: Stoikov nicht relevant (Extended Hours haben eigene Limit-Logik in broker)
+            order_id = self.broker.market_buy(signal.symbol, signal.qty)
         if order_id:
             signal.reason += f" -> Order {order_id}"
             self.trade_log.append(signal)
@@ -657,8 +695,22 @@ class Engine:
             except Exception as e:
                 logger.error(f"Exit check error {symbol}: {e}")
 
-    def scan_once(self, market_status: str):
+    def scan_once(self, market_status: str) -> list[str]:
+        """
+        Scannt aktive Watchlist + Spike-Sensor Universum.
+        Gibt Liste der erkannten Spike-Symbole zurück (für Telegram-Alerts).
+        """
         active_watchlist = self.watchlist.get_active_watchlist(market_status)
+
+        # Spike-Sensor: breiter Markt (nur wenn Markt offen/extended)
+        spike_symbols: list[str] = []
+        if market_status in ("open", "extended"):
+            spike_symbols = self.spike_sensor.scan()
+            # Spike-Symbole zur Watchlist hinzufügen (keine Duplikate)
+            extra = [s for s in spike_symbols if s not in active_watchlist]
+            if extra:
+                logger.info(f"[SPIKE] {len(extra)} neue Symbole zur Analyse: {', '.join(extra)}")
+            active_watchlist = list(dict.fromkeys(active_watchlist + extra))
 
         logger.info(f"\n{'=' * 60}")
         logger.info(f"  SCAN @ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -670,18 +722,38 @@ class Engine:
 
         self.check_exit_conditions()
 
-        for symbol in active_watchlist:
+        # Phase 1 — Parallel: Formel-Analyse + Alpaca-Daten für alle Symbole gleichzeitig
+        signals: list[TradeSignal] = [None] * len(active_watchlist)
+
+        def _analyze(idx_sym):
+            idx, sym = idx_sym
             try:
-                signal = self.analyze_symbol(symbol)
-                print(signal.summary())
-                if signal.all_passed:
-                    self.execute_signal(signal)
+                return idx, self.analyze_symbol(sym)
             except Exception as e:
-                logger.error(f"Error {symbol}: {e}")
+                logger.error(f"Error analyzing {sym}: {e}")
+                return idx, None
+
+        max_workers = min(len(active_watchlist), 8)
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {pool.submit(_analyze, (i, sym)): sym
+                       for i, sym in enumerate(active_watchlist)}
+            for future in as_completed(futures):
+                idx, signal = future.result()
+                if signal is not None:
+                    signals[idx] = signal
+
+        # Phase 2 — Sequenziell: Gemini Reasoning + Order-Ausführung
+        for signal in signals:
+            if signal is None:
+                continue
+            print(signal.summary())
+            if signal.all_passed:
+                self.execute_signal(signal)
 
         equity = self.broker.get_equity()
         positions = self.broker.get_positions()
         logger.info(f"Equity: ${equity:,.2f}  |  Positions: {len(positions)}  |  Trades: {len(self.trade_log)}")
+        return spike_symbols
 
     def run(self):
         logger.info("=" * 60)
@@ -700,7 +772,7 @@ class Engine:
                     time.sleep(300)
                     continue
 
-                self.scan_once(market_status)
+                self.scan_once(market_status)  # spike_symbols ignoriert in standalone run()
 
             except KeyboardInterrupt:
                 logger.info("\nShutting down...")
