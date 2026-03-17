@@ -223,6 +223,95 @@ Antworte NUR mit JSON:
             except Exception as e:
                 return self._cascade_fallback(symbol, signal.cascade_level, f"Gemini-Exception: {e}")
 
+    def check_hold_or_sell(
+        self,
+        symbol: str,
+        signal: "TradeSignal",
+        entry_price: float,
+        current_price: float,
+        equity: float,
+        regime: str,
+    ) -> dict:
+        """
+        Post-Trade Check: Wir haben bereits gekauft.
+        Gemini entscheidet: HOLD (halten) oder SELL (sofort verkaufen).
+        Semantik korrekt: HOLD = Position behalten, SELL = Position schließen.
+        """
+        formula_summary = "\n".join(
+            f"  - {name}: signal={r['signal']:.3f} {'PASS' if r['passed'] else 'FAIL'}"
+            for name, r in signal.results.items()
+        )
+        pnl_pct = (current_price - entry_price) / entry_price * 100 if entry_price > 0 else 0
+        market_context_str = self.market_ctx.format_for_prompt(symbol)
+
+        prompt = f"""Du bist ein erfahrener Trader. Wir haben soeben eine Position eröffnet und prüfen jetzt ob wir sie halten sollen.
+
+SYMBOL: {symbol}
+EINSTIEG: ${entry_price:.2f}  |  AKTUELL: ${current_price:.2f}  |  P/L: {pnl_pct:+.2f}%
+DEPOT: ${equity:,.2f}
+MARKT-REGIME: {regime}
+KASKADE: {signal.cascade_label}
+
+QUANTITATIVE SIGNALE:
+{formula_summary}
+
+MARKT-KONTEXT:
+{market_context_str}
+
+Die Position wurde gerade eröffnet (Express Lane, {signal.cascade_level}/7 Filter bestanden).
+Entscheide: Soll die Position GEHALTEN oder SOFORT VERKAUFT werden?
+
+HOLD = Position halten (Setup ist valide)
+SELL = Sofort verkaufen (Setup hat einen kritischen Fehler / Marktlage hat sich gedreht)"""
+
+        try:
+            from google.genai import types as genai_types
+
+            response_schema = genai_types.Schema(
+                type=genai_types.Type.OBJECT,
+                properties={
+                    "decision":        genai_types.Schema(type=genai_types.Type.STRING, enum=["HOLD", "SELL"]),
+                    "confidence":      genai_types.Schema(type=genai_types.Type.NUMBER),
+                    "reason":          genai_types.Schema(type=genai_types.Type.STRING),
+                    "risk_factors":    genai_types.Schema(
+                        type=genai_types.Type.ARRAY,
+                        items=genai_types.Schema(type=genai_types.Type.STRING),
+                    ),
+                },
+                required=["decision", "confidence", "reason", "risk_factors"],
+            )
+
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=prompt,
+                config=genai_types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=response_schema,
+                    temperature=0.1,
+                    max_output_tokens=200,
+                    thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
+                ),
+            )
+
+            result = json.loads(response.text or "{}")
+            should_sell = result.get("decision", "HOLD") == "SELL"
+            logger.info(
+                f"[HOLD/SELL] {symbol}: {result.get('decision')} "
+                f"({result.get('confidence', 0):.0%}) — {result.get('reason', '')}"
+            )
+            return {
+                "sell": should_sell,
+                "confidence": float(result.get("confidence", 0)),
+                "reason": result.get("reason", ""),
+                "risk_factors": result.get("risk_factors", []),
+                "prompt": prompt,
+                "raw_response": response.text or "",
+            }
+
+        except Exception as e:
+            logger.error(f"[HOLD/SELL] {symbol}: Gemini Fehler: {e} → HOLD (sicherer Default)")
+            return {"sell": False, "confidence": 0.0, "reason": f"Fehler: {e}", "risk_factors": []}
+
 
 # ═══════════════════════════════════════════════════════
 #  DYNAMISCHE WATCHLIST (Gemini findet neue Aktien)
@@ -515,60 +604,73 @@ class Engine:
     def _async_gemini_autopsy(
         self,
         signal: "TradeSignal",
-        price: float,
+        entry_price: float,
         equity: float,
         order_id: str,
         vix_value,
     ):
         """
         Läuft im Hintergrund-Thread NACH der Order-Ausführung.
-        Befragt Gemini retrospektiv — ohne den Trade zu blockieren.
-        Ergebnis wird als Autopsy-JSON gespeichert (inkl. ob Gemini zugestimmt hätte).
+        Gemini entscheidet: HOLD (halten) oder SELL (sofort verkaufen).
+        Klare Semantik: HOLD = behalten, SELL = schließen.
         """
         def _run():
             try:
-                reasoning = self.reasoning.approve_trade(
+                current_price = self.broker.get_latest_price(signal.symbol) or entry_price
+                verdict = self.reasoning.check_hold_or_sell(
                     symbol=signal.symbol,
                     signal=signal,
-                    price=price,
+                    entry_price=entry_price,
+                    current_price=current_price,
                     equity=equity,
                     regime=self.risk.regime.value,
                 )
-                reasoning["cascade_level"] = signal.cascade_level
-                reasoning["express_lane"] = True
+
+                # Autopsy-JSON speichern (mit HOLD/SELL Ergebnis)
+                autopsy_reasoning = {
+                    "approved": not verdict["sell"],
+                    "confidence": verdict["confidence"],
+                    "probability_pct": round(verdict["confidence"] * 100),
+                    "reason": verdict["reason"],
+                    "risk_factors": verdict["risk_factors"],
+                    "raw": {"decision": "SELL" if verdict["sell"] else "HOLD"},
+                    "prompt": verdict.get("prompt", ""),
+                    "raw_response": verdict.get("raw_response", ""),
+                    "cascade_level": signal.cascade_level,
+                    "express_lane": True,
+                }
                 self.learner.save_autopsy(
                     symbol=signal.symbol,
                     regime=self.risk.regime.value,
                     formula_results=signal.results,
-                    reasoning=reasoning,
-                    price=price,
+                    reasoning=autopsy_reasoning,
+                    price=entry_price,
                     vix=vix_value,
                     order_id=order_id,
                 )
 
-                if reasoning.get("approved"):
+                if not verdict["sell"]:
                     logger.info(
-                        f"[EXPRESS LANE ✓ HALTEN] {signal.symbol}: Gemini bestätigt "
-                        f"({reasoning.get('probability_pct', 0)}%) — {reasoning.get('reason', '')}"
+                        f"[EXPRESS LANE → HOLD ✓] {signal.symbol}: Position wird gehalten "
+                        f"({verdict['confidence']:.0%}) — {verdict['reason']}"
                     )
                 else:
-                    # Gemini sagt HOLD → Position sofort schließen
                     logger.warning(
-                        f"[EXPRESS LANE ✗ VERKAUF] {signal.symbol}: Gemini empfiehlt Verkauf "
-                        f"({reasoning.get('probability_pct', 0)}%) — {reasoning.get('reason', '')} "
-                        f"| Risiken: {reasoning.get('risk_factors', [])}"
+                        f"[EXPRESS LANE → SELL ✗] {signal.symbol}: Gemini sagt VERKAUFEN "
+                        f"({verdict['confidence']:.0%}) — {verdict['reason']} "
+                        f"| Risiken: {verdict.get('risk_factors', [])}"
                     )
                     if self.broker.has_position(signal.symbol):
                         self.broker.close_position(signal.symbol)
                         self.position_highs.pop(signal.symbol, None)
                         self.learner.record_exit(
                             signal.symbol,
-                            self.broker.get_latest_price(signal.symbol) or price,
-                            f"Gemini-Veto nach Express Lane (async): {reasoning.get('reason', '')}",
+                            self.broker.get_latest_price(signal.symbol) or entry_price,
+                            f"Gemini SELL nach Express Lane: {verdict['reason']}",
                         )
-                        logger.warning(f"[EXPRESS LANE ✗] {signal.symbol}: Position geschlossen")
+                        logger.warning(f"[EXPRESS LANE → SELL ✗] {signal.symbol}: Position geschlossen")
                     else:
-                        logger.info(f"[EXPRESS LANE ✗] {signal.symbol}: Position bereits geschlossen")
+                        logger.info(f"[EXPRESS LANE → SELL] {signal.symbol}: Position bereits geschlossen")
             except Exception as e:
                 logger.error(f"[EXPRESS LANE AUTOPSY] {signal.symbol}: Fehler: {e}")
 
@@ -789,8 +891,9 @@ class Engine:
                 vix_value = None
 
             if reasoning.get("raw_response") == "EXPRESS_LANE":
-                # Express Lane: Gemini-Analyse läuft async im Hintergrund
-                self._async_gemini_autopsy(signal, price, equity, order_id, vix_value)
+                # Express Lane: Gemini prüft async HOLD oder SELL
+                self._async_gemini_autopsy(signal, entry_price=price, equity=equity,
+                                           order_id=order_id, vix_value=vix_value)
             else:
                 # Normaler Trade: Autopsy sofort (Gemini hat bereits geantwortet)
                 reasoning["cascade_level"] = signal.cascade_level
