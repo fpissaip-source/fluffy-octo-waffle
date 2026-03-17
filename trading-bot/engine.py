@@ -116,12 +116,23 @@ Antworte NUR mit JSON:
         try:
             from google.genai import types as genai_types
 
+            def _get_text(response):
+                """Extrahiert Text robust aus Gemini-Response (response.text kann None sein)."""
+                try:
+                    if response.text:
+                        return response.text
+                except Exception:
+                    pass
+                try:
+                    return response.candidates[0].content.parts[0].text or ""
+                except Exception:
+                    return ""
+
             def _call_gemini(contents):
                 return self.client.models.generate_content(
                     model=self.model,
                     contents=contents,
                     config=genai_types.GenerateContentConfig(
-                        system_instruction="You are a JSON API. Output only valid JSON. Never write any text outside the JSON object.",
                         response_mime_type="application/json",
                         temperature=0.1,
                         max_output_tokens=300,
@@ -150,7 +161,7 @@ Antworte NUR mit JSON:
                 return None
 
             response = _call_gemini(prompt)
-            text = response.text or ""
+            text = _get_text(response)
             result = _extract_json(text)
 
             # Versuch 2: Retry mit explizitem JSON-only Prompt
@@ -162,7 +173,7 @@ Antworte NUR mit JSON:
                     'Now output the JSON for this context:\n' + prompt
                 )
                 response2 = _call_gemini(retry_prompt)
-                text2 = response2.text or ""
+                text2 = _get_text(response2)
                 result = _extract_json(text2)
 
             if not result:
