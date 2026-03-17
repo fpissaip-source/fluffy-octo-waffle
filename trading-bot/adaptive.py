@@ -18,7 +18,7 @@ Stattdessen: Bayesian Weight Updates — robust, interpretierbar.
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -230,6 +230,73 @@ class AdaptiveLearner:
 
     # ── Lernalgorithmus ─────────────────────────────────
 
+    # ── Regime Decay (Verhindert Overfitting auf veraltete Muster) ─────
+
+    # Nach dieser Anzahl Tage ohne Trade in einem Regime beginnt der Zerfall
+    DECAY_START_DAYS: int = 7
+    # Wie stark pro Tag zurück zu DEFAULT_WEIGHTS (5% pro Tag)
+    DECAY_RATE_PER_DAY: float = 0.05
+
+    def _apply_decay(self):
+        """
+        Zerfällt Gewichte inaktiver Regime langsam zurück zu DEFAULT_WEIGHTS.
+
+        Beispiel: CRISIS-Regime war 14 Tage nicht aktiv (kein Trade):
+          → 7 Tage über Schwelle × 5%/Tag = 35% Zerfall Richtung Default
+          → Ein Gewicht von 1.5 (CRISIS Stoikov) zerfällt auf ~1.33
+
+        Verhindert, dass veraltete Muster aus vergangenen Crashes
+        das aktuelle Trading beeinflussen.
+        """
+        now = datetime.now()
+        changed = False
+
+        for regime in ["CALM", "NORMAL", "VOLATILE", "CRISIS"]:
+            if regime not in self.weights:
+                continue
+
+            # Letzten Trade in diesem Regime finden
+            regime_trades = [
+                t for t in self.trade_history
+                if t.regime == regime and t.entry_time
+            ]
+            if not regime_trades:
+                continue
+
+            try:
+                last_entry = max(regime_trades, key=lambda t: t.entry_time)
+                last_time = datetime.fromisoformat(last_entry.entry_time)
+                days_inactive = (now - last_time).days
+            except Exception:
+                continue
+
+            if days_inactive < self.DECAY_START_DAYS:
+                continue
+
+            # Zerfall berechnen: linear mit Tagen über dem Schwellwert
+            days_over = days_inactive - self.DECAY_START_DAYS + 1
+            decay_factor = min(1.0, self.DECAY_RATE_PER_DAY * days_over)
+
+            default = DEFAULT_WEIGHTS.get(regime, DEFAULT_WEIGHTS["NORMAL"])
+            for formula_name in self.weights[regime]:
+                current = self.weights[regime][formula_name]
+                target = default.get(formula_name, 1.0)
+                if abs(current - target) < 0.01:
+                    continue
+                new_weight = current + (target - current) * decay_factor
+                new_weight = round(max(0.3, min(2.0, new_weight)), 3)
+                if abs(new_weight - current) > 0.01:
+                    logger.info(
+                        f"[DECAY] [{regime}] {formula_name}: "
+                        f"{current:.2f} → {new_weight:.2f} "
+                        f"({days_inactive}d inaktiv, factor={decay_factor:.2f})"
+                    )
+                    self.weights[regime][formula_name] = new_weight
+                    changed = True
+
+        if changed:
+            logger.info("[DECAY] Gewichte nach Inaktivitäts-Zerfall gespeichert")
+
     def _update_weights(self):
         """
         Aktualisiert Formel-Gewichte basierend auf Trade-Outcomes.
@@ -238,11 +305,15 @@ class AdaptiveLearner:
         1. Sammle alle abgeschlossenen Trades
         2. Berechne Korrelation zwischen jedem Formel-Score und P/L
         3. Passe Gewichte an: Mehr Gewicht fuer Formeln die P/L vorhersagen
+        4. Wende Regime-Decay an (inaktive Regime → zurück zu Default)
         """
         closed_trades = [t for t in self.trade_history if t.exit_price is not None]
 
         if len(closed_trades) < self.min_trades_to_learn:
-            return  # Zu wenig Daten
+            # Auch bei wenig Daten: Decay anwenden
+            self._apply_decay()
+            self._save()
+            return
 
         for regime in ["CALM", "NORMAL", "VOLATILE", "CRISIS"]:
             regime_trades = [t for t in closed_trades if t.regime == regime]
@@ -291,6 +362,8 @@ class AdaptiveLearner:
 
                     self.weights[regime][formula_name] = round(new_weight, 3)
 
+        # Decay nach dem Korrelations-Update anwenden
+        self._apply_decay()
         self._save()
 
     # ── Gewichteten Score berechnen ─────────────────────

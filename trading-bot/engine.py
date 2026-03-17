@@ -12,6 +12,7 @@ engine.py — Drei-Schichten-Architektur:
 
 import json
 import logging
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
@@ -155,93 +156,56 @@ Antworte NUR mit JSON:
             try:
                 from google.genai import types as genai_types
 
-                def _get_text(response):
-                    try:
-                        if response.text:
-                            return response.text
-                    except Exception:
-                        pass
-                    try:
-                        parts = response.candidates[0].content.parts
-                        for part in parts:
-                            if not getattr(part, 'thought', False) and part.text:
-                                return part.text
-                        return parts[0].text or ""
-                    except Exception:
-                        return ""
-
-                def _call_gemini(contents):
-                    return self.client.models.generate_content(
-                        model=self.model,
-                        contents=contents,
-                        config=genai_types.GenerateContentConfig(
-                            response_mime_type="application/json",
-                            temperature=0.1,
-                            max_output_tokens=300,
-                            thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
+                # ── Structured Output Schema — kein JSON-Parsing nötig ──
+                response_schema = genai_types.Schema(
+                    type=genai_types.Type.OBJECT,
+                    properties={
+                        "decision":        genai_types.Schema(type=genai_types.Type.STRING, enum=["BUY", "HOLD"]),
+                        "probability_pct": genai_types.Schema(type=genai_types.Type.INTEGER),
+                        "confidence":      genai_types.Schema(type=genai_types.Type.NUMBER),
+                        "reason":          genai_types.Schema(type=genai_types.Type.STRING),
+                        "risk_factors":    genai_types.Schema(
+                            type=genai_types.Type.ARRAY,
+                            items=genai_types.Schema(type=genai_types.Type.STRING),
                         ),
-                    )
+                    },
+                    required=["decision", "probability_pct", "confidence", "reason", "risk_factors"],
+                )
 
-                def _extract_json(text):
-                    try:
-                        return json.loads(text)
-                    except json.JSONDecodeError:
-                        pass
-                    depth, start = 0, None
-                    for i, c in enumerate(text):
-                        if c == '{':
-                            if depth == 0:
-                                start = i
-                            depth += 1
-                        elif c == '}':
-                            depth -= 1
-                            if depth == 0 and start is not None:
-                                try:
-                                    return json.loads(text[start:i + 1])
-                                except json.JSONDecodeError:
-                                    pass
-                                break
-                    return None
+                response = self.client.models.generate_content(
+                    model=self.model,
+                    contents=prompt,
+                    config=genai_types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=response_schema,
+                        temperature=0.1,
+                        max_output_tokens=300,
+                        thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
+                    ),
+                )
 
-                response = _call_gemini(prompt)
-                raw_text = _get_text(response)
-                result = _extract_json(raw_text)
+                raw_text = response.text or ""
+                result = json.loads(raw_text)
 
-                if not result:
-                    logger.warning(f"[REASONING] {symbol}: Gemini-Antwort nicht parsebar — Retry...")
-                    retry_prompt = (
-                        'Output ONLY raw JSON, no text before or after. Example:\n'
-                        '{"decision":"HOLD","probability_pct":40,"confidence":0.4,"reason":"...","risk_factors":[]}\n\n'
-                        'Now output the JSON for this context:\n' + prompt
-                    )
-                    response2 = _call_gemini(retry_prompt)
-                    raw_text = _get_text(response2)
-                    result = _extract_json(raw_text)
-
-                if result:
-                    approved = (
-                        result.get("decision", "HOLD") == "BUY"
-                        and float(result.get("confidence", 0)) >= self.min_confidence
-                    )
-                    prob_pct = int(result.get("probability_pct", round(float(result.get("confidence", 0)) * 100)))
-                    logger.info(
-                        f"[REASONING] {symbol}: {result.get('decision')} "
-                        f"Wahrscheinlichkeit={prob_pct}% | {result.get('reason', '')}"
-                    )
-                    return {
-                        "approved": approved,
-                        "confidence": float(result.get("confidence", 0)),
-                        "probability_pct": prob_pct,
-                        "reason": result.get("reason", ""),
-                        "risk_factors": result.get("risk_factors", []),
-                        "raw": result,
-                        "prompt": prompt,
-                        "raw_response": raw_text,
-                    }
-
-                logger.warning(f"[REASONING] {symbol}: JSON parse error nach Retry")
-                return {"approved": False, "confidence": 0.0, "reason": "JSON parse error",
-                        "risk_factors": [], "raw": {}, "prompt": prompt, "raw_response": raw_text}
+                approved = (
+                    result.get("decision", "HOLD") == "BUY"
+                    and float(result.get("confidence", 0)) >= self.min_confidence
+                )
+                prob_pct = int(result.get("probability_pct", round(float(result.get("confidence", 0)) * 100)))
+                logger.info(
+                    f"[REASONING] {symbol}: {result.get('decision')} "
+                    f"Wahrscheinlichkeit={prob_pct}% | {result.get('reason', '')}"
+                )
+                return {
+                    "approved": approved,
+                    "confidence": float(result.get("confidence", 0)),
+                    "probability_pct": prob_pct,
+                    "reason": result.get("reason", ""),
+                    "risk_factors": result.get("risk_factors", []),
+                    "raw": result,
+                    "prompt": prompt,
+                    "raw_response": raw_text,
+                }
 
             except Exception as e:
                 logger.error(f"[REASONING] {symbol}: Gemini Fehler: {e}")
@@ -546,6 +510,52 @@ class Engine:
         self.spike_sensor = SpikeSensor(self.broker)
         self.trade_log: list[TradeSignal] = []
         self.position_highs: dict[str, float] = {}
+        self._async_threads: list[threading.Thread] = []
+
+    def _async_gemini_autopsy(
+        self,
+        signal: "TradeSignal",
+        price: float,
+        equity: float,
+        order_id: str,
+        vix_value,
+    ):
+        """
+        Läuft im Hintergrund-Thread NACH der Order-Ausführung.
+        Befragt Gemini retrospektiv — ohne den Trade zu blockieren.
+        Ergebnis wird als Autopsy-JSON gespeichert (inkl. ob Gemini zugestimmt hätte).
+        """
+        def _run():
+            try:
+                reasoning = self.reasoning.approve_trade(
+                    symbol=signal.symbol,
+                    signal=signal,
+                    price=price,
+                    equity=equity,
+                    regime=self.risk.regime.value,
+                )
+                reasoning["cascade_level"] = signal.cascade_level
+                reasoning["express_lane"] = True  # Markierung: Trade war bereits ausgeführt
+                self.learner.save_autopsy(
+                    symbol=signal.symbol,
+                    regime=self.risk.regime.value,
+                    formula_results=signal.results,
+                    reasoning=reasoning,
+                    price=price,
+                    vix=vix_value,
+                    order_id=order_id,
+                )
+                verdict = "HÄTTE APPROVED" if reasoning.get("approved") else "HÄTTE GEBLOCKT"
+                logger.info(
+                    f"[EXPRESS LANE AUTOPSY] {signal.symbol}: Gemini {verdict} "
+                    f"({reasoning.get('probability_pct', 0)}%) — {reasoning.get('reason', '')}"
+                )
+            except Exception as e:
+                logger.error(f"[EXPRESS LANE AUTOPSY] {signal.symbol}: Fehler: {e}")
+
+        t = threading.Thread(target=_run, daemon=True, name=f"autopsy-{signal.symbol}")
+        t.start()
+        self._async_threads.append(t)
 
     def analyze_symbol(self, symbol: str) -> TradeSignal:
         signal = TradeSignal(symbol)
@@ -668,15 +678,36 @@ class Engine:
         max_qty = self.risk.max_position_size(equity, price)
         signal.qty = min(signal.qty, max_qty)
 
-        # ── SCHICHT 2: Reasoning Layer (Gemini Pflicht-Check) ──
-        reasoning = self.reasoning.approve_trade(
-            symbol=signal.symbol,
-            signal=signal,
-            price=price,
-            equity=equity,
-            regime=self.risk.regime.value,
-        )
-        signal.reason += f" | GPT4o={reasoning.get('probability_pct', round(reasoning['confidence']*100))}%: {reasoning['reason']}"
+        # ── SCHICHT 2: Reasoning Layer ──
+        # EXPRESS LANE: 7/7 oder 6/7 → sofort handeln, Gemini läuft async im Hintergrund
+        if signal.cascade_level >= 6:
+            express_confidence = 0.85 if signal.cascade_level >= 7 else 0.75
+            express_prob = 85 if signal.cascade_level >= 7 else 75
+            reasoning = {
+                "approved": True,
+                "confidence": express_confidence,
+                "probability_pct": express_prob,
+                "reason": f"Express Lane: {signal.cascade_level}/7 Kaskade — Gemini analysiert async",
+                "risk_factors": [],
+                "raw": {},
+                "prompt": "",
+                "raw_response": "EXPRESS_LANE",
+            }
+            logger.info(
+                f"[EXPRESS LANE] {signal.symbol}: {signal.cascade_level}/7 → "
+                f"Direkt-Execution ohne Gemini-Wartezeit"
+            )
+        else:
+            # 4/7 oder 5/7 → normaler Gemini-Check (blockierend)
+            reasoning = self.reasoning.approve_trade(
+                symbol=signal.symbol,
+                signal=signal,
+                price=price,
+                equity=equity,
+                regime=self.risk.regime.value,
+            )
+
+        signal.reason += f" | Gemini={reasoning.get('probability_pct', round(reasoning['confidence']*100))}%: {reasoning['reason']}"
 
         if not reasoning["approved"]:
             logger.warning(
@@ -690,7 +721,7 @@ class Engine:
         logger.info(f"{'=' * 40}")
         logger.info(f"EXECUTING: BUY {signal.qty}x {signal.symbol}")
         logger.info(f"Regime: {self.risk.regime.value} | {self.risk.params['description']}")
-        logger.info(f"Gemini: {reasoning.get('probability_pct', round(reasoning['confidence']*100))}% Wahrscheinlichkeit — {reasoning['reason']}")
+        logger.info(f"Gemini: {reasoning.get('probability_pct', round(reasoning['confidence']*100))}% — {reasoning['reason']}")
         logger.info(f"{'=' * 40}")
 
         # Stoikov self-deciding: Limit-Order wenn Reservation Price verfuegbar
@@ -727,22 +758,28 @@ class Engine:
                 qty=signal.qty,
             )
 
-            # ── Trade Autopsy: vollstaendiger State-Dump fuer Post-Mortem Debugging ──
+            # ── Trade Autopsy ──
             try:
                 vix_data = self.reasoning.market_ctx.vix.get()
                 vix_value = vix_data.get("vix")
             except Exception:
                 vix_value = None
-            reasoning["cascade_level"] = signal.cascade_level
-            self.learner.save_autopsy(
-                symbol=signal.symbol,
-                regime=self.risk.regime.value,
-                formula_results=signal.results,
-                reasoning=reasoning,
-                price=price,
-                vix=vix_value,
-                order_id=order_id,
-            )
+
+            if reasoning.get("raw_response") == "EXPRESS_LANE":
+                # Express Lane: Gemini-Analyse läuft async im Hintergrund
+                self._async_gemini_autopsy(signal, price, equity, order_id, vix_value)
+            else:
+                # Normaler Trade: Autopsy sofort (Gemini hat bereits geantwortet)
+                reasoning["cascade_level"] = signal.cascade_level
+                self.learner.save_autopsy(
+                    symbol=signal.symbol,
+                    regime=self.risk.regime.value,
+                    formula_results=signal.results,
+                    reasoning=reasoning,
+                    price=price,
+                    vix=vix_value,
+                    order_id=order_id,
+                )
 
         return order_id
 
