@@ -30,7 +30,12 @@ def evaluate(bars: pd.DataFrame, **kwargs) -> dict:
     gap_pct = (fair_value - current_price) / current_price
     upside = abs(gap_pct) if gap_pct > 0 else abs(gap_pct) * 0.3
     downside = abs(gap_pct) * 0.5
-    ev = win_prob * upside - (1 - win_prob) * downside
+
+    # Slippage & Gebuehren vom EV abziehen
+    cost_pct = (Config.SLIPPAGE_BPS + Config.FEE_BPS) / 10000 * 2  # Roundtrip
+    net_upside = max(upside - cost_pct, 0.0)
+    net_downside = downside + cost_pct
+    ev = win_prob * net_upside - (1 - win_prob) * net_downside
 
     direction = "LONG" if gap_pct > 0 else "SHORT" if gap_pct < -Config.MIN_EV_GAP else "NEUTRAL"
 
@@ -44,5 +49,6 @@ def evaluate(bars: pd.DataFrame, **kwargs) -> dict:
             "gap_pct": f"{gap_pct:+.2%}",
             "ev": round(ev, 5),
             "direction": direction,
+            "cost_pct": f"{cost_pct*100:.3f}%",
         },
     }
