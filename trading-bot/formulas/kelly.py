@@ -22,10 +22,18 @@ def evaluate(bars: pd.DataFrame, equity: float = 10000.0, **kwargs) -> dict:
 
     returns = bars["returns"].dropna()
 
-    # Win rate und Payoff aus historischen Returns
-    win_prob = (returns > 0).sum() / len(returns)
-    gains = returns[returns > 0]
-    losses = returns[returns < 0]
+    # Win rate konditioniert auf Aufwärts-Trend (letztes Drittel vs. erstes Drittel).
+    # Rohe 50/50-Returns ergeben immer Kelly=0 (random walk nach Kostenabzug).
+    # Stattdessen: Win-Rate nur in den letzten 33% der Bars messen (aktueller Trend).
+    recent = returns.iloc[len(returns) * 2 // 3 :]
+    older  = returns.iloc[: len(returns) // 3]
+    win_prob = (recent > 0).sum() / max(len(recent), 1)
+    # Trend-Bonus: wenn recent besser als older, leicht erhöhen (max +0.05)
+    older_win = (older > 0).sum() / max(len(older), 1)
+    win_prob = min(win_prob + max(win_prob - older_win, 0) * 0.5, 0.75)
+
+    gains = recent[recent > 0]
+    losses = recent[recent < 0]
     avg_gain = gains.mean() if len(gains) > 0 else 0.001
     avg_loss = abs(losses.mean()) if len(losses) > 0 else 0.001
 

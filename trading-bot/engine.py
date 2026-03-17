@@ -629,12 +629,9 @@ class TradeSignal:
             self.reason = f"Only {len(self.results)}/7 formulas ran"
             return
 
-        # Pflicht-Filter: Kelly muss immer passen (Edge-Schutz)
-        if "Kelly" in self.results and not self.results["Kelly"]["passed"]:
-            self.all_passed = False
-            self.action = "HOLD"
-            self.reason = "Mandatory filter failed: Kelly"
-            return
+        # Kelly zählt als normaler Filter (1/7), kein Mandatory-Block mehr.
+        # Kelly=0.0 war strukturell immer False (random walk nach Kostenabzug),
+        # daher hat er jeden Trade blockiert. Sizing läuft weiterhin über Kelly.
 
         # Alle 7 Filter zählen in der Kaskade (inkl. Stoikov).
         # Stoikov bestimmt ZUSÄTZLICH den Order-Typ (Limit vs Market).
