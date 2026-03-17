@@ -328,9 +328,13 @@ class WatchlistDiscovery:
         from google import genai
         self.client = genai.Client(api_key=Config.GEMINI_API_KEY)
         self.last_update = 0
-        self.update_interval = 900   # alle 15 Minuten (war 1h)
+        self.update_interval = 600   # alle 10 Minuten (war 15min/900s)
         self.dynamic_symbols: list[str] = []
         self.broker = broker
+        # Tagesende-Tracking: welche Symbole wurden heute auto-hinzugefügt
+        self.auto_added: list[dict] = []   # [{symbol, added_at}]
+        self._last_market_status: str = ""
+        self.notify: Optional[callable] = None
         logger.info("[WATCHLIST] Dynamic discovery initialisiert")
 
     def should_update(self) -> bool:
@@ -409,7 +413,10 @@ class WatchlistDiscovery:
         candidates = self._get_top_candidates(market_status)
 
         if not candidates:
-            logger.warning("[WATCHLIST] Keine Alpaca-Kandidaten — behalte letzte Symbole")
+            logger.warning("[WATCHLIST] Keine Alpaca-Kandidaten — retry in 60s")
+            # BUG-FIX: last_update setzen, damit der Bot nicht auf JEDEM Scan erneut
+            # versucht (war: last_update blieb 0 → selbe Aktien nach 20+ Minuten)
+            self.last_update = time.time() - self.update_interval + 60
             return self.dynamic_symbols
 
         if market_status == "closed":
@@ -479,6 +486,7 @@ Antworte NUR mit JSON:
                 self.dynamic_symbols = validated[:15]
                 self.last_update = time.time()
                 logger.info(f"[WATCHLIST] Neue Symbole ({len(self.dynamic_symbols)}): {self.dynamic_symbols} | {result.get('reasoning', '')}")
+                self._add_top_favorite()
                 return self.dynamic_symbols
 
         except Exception as e:
@@ -487,14 +495,98 @@ Antworte NUR mit JSON:
         # Fallback: direkt Top-8 aus Alpaca-Daten nehmen
         self.dynamic_symbols = candidates[:8]
         self.last_update = time.time()
+        self._add_top_favorite()
         return self.dynamic_symbols
+
+    def _add_top_favorite(self):
+        """
+        Fügt die beste neu entdeckte Aktie einmalig zur permanenten Watchlist hinzu.
+        Pro Refresh-Zyklus wird maximal 1 Symbol hinzugefügt.
+        Crypto-Symbole werden übersprungen (enden auf USD/BTC/ETH/SOL).
+        """
+        for sym in self.dynamic_symbols:
+            # Kein Crypto, kein Duplikat
+            if any(sym.endswith(x) for x in ("USD", "BTC", "ETH", "SOL")):
+                continue
+            if sym in Config.WATCHLIST:
+                continue
+            Config.WATCHLIST.append(sym)
+            self.auto_added.append({"symbol": sym, "added_at": time.time()})
+            logger.info(f"[WATCHLIST] ⭐ Favorit hinzugefügt: {sym} (gesamt Watchlist: {len(Config.WATCHLIST)})")
+            if self.notify:
+                self.notify(f"⭐ <b>Watchlist +1</b>: <b>{sym}</b> wurde als Tages-Favorit hinzugefügt")
+            break  # nur 1 pro Zyklus
+
+    def evaluate_end_of_day(self):
+        """
+        Tagesende-Auswertung: Für jedes auto-hinzugefügte Symbol wird die
+        Tagesperformance geprüft. Gute Aktien (positive Rendite) bleiben,
+        schlechte werden aus Config.WATCHLIST entfernt.
+        Sendet Zusammenfassung per Telegram.
+        """
+        if not self.auto_added:
+            return
+
+        logger.info(f"[WATCHLIST EOD] Auswerte {len(self.auto_added)} auto-hinzugefügte Symbole...")
+        keep_list, remove_list = [], []
+
+        for entry in self.auto_added:
+            sym = entry["symbol"]
+            keep = False
+            reason = "Keine Daten"
+            try:
+                if self.broker:
+                    bars = self.broker.get_bars(sym, timeframe="1Hour", limit=8)
+                    if bars is not None and not bars.empty and len(bars) >= 2:
+                        day_return = (bars["close"].iloc[-1] - bars["close"].iloc[0]) / bars["close"].iloc[0]
+                        keep = day_return > 0
+                        reason = f"{day_return:+.2%} Tagesrendite"
+                    else:
+                        reason = "Keine Kursdaten"
+            except Exception as e:
+                reason = f"Fehler: {e}"
+
+            if keep:
+                keep_list.append((sym, reason))
+                logger.info(f"[WATCHLIST EOD] ✅ BEHALTEN: {sym} — {reason}")
+            else:
+                remove_list.append((sym, reason))
+                if sym in Config.WATCHLIST:
+                    Config.WATCHLIST.remove(sym)
+                logger.info(f"[WATCHLIST EOD] ❌ ENTFERNT: {sym} — {reason}")
+
+        # Telegram-Zusammenfassung
+        if self.notify:
+            lines = ["📊 <b>Tagesende — Watchlist-Auswertung</b>", "━━━━━━━━━━━━━━━━━━━━━━"]
+            if keep_list:
+                lines.append("✅ <b>Behalten:</b>")
+                for sym, r in keep_list:
+                    lines.append(f"  • <b>{sym}</b> — {r}")
+            if remove_list:
+                lines.append("❌ <b>Entfernt:</b>")
+                for sym, r in remove_list:
+                    lines.append(f"  • <b>{sym}</b> — {r}")
+            lines.append(f"\nWatchlist jetzt: {', '.join(Config.WATCHLIST)}")
+            self.notify("\n".join(lines))
+
+        # Reset für nächsten Tag — behaltene Symbole bleiben in der Liste für
+        # die nächste Auswertung, neu entdeckte starten wieder bei 0
+        self.auto_added = [e for e in self.auto_added if e["symbol"] in [s for s, _ in keep_list]]
 
     def get_active_watchlist(self, market_status: str) -> list[str]:
         """
         Kombiniert Basis-Watchlist (.env) mit Gemini Vorschlaegen.
         'closed' (Nacht/Wochenende): nur Crypto.
         'open' + 'extended': Aktien + Crypto.
+        Erkennt Markt-Schluss-Übergang und triggert Tagesende-Auswertung.
         """
+        # Tagesende-Erkennung: open/extended → closed
+        if (self._last_market_status in ("open", "extended")
+                and market_status == "closed"):
+            logger.info("[WATCHLIST EOD] Markt geschlossen — starte Tagesende-Auswertung")
+            self.evaluate_end_of_day()
+        self._last_market_status = market_status
+
         dynamic = self.discover(market_status)
 
         if market_status == "closed":
@@ -595,6 +687,7 @@ class Engine:
         self.learner = AdaptiveLearner()
         self.reasoning = ReasoningLayer()
         self.watchlist = WatchlistDiscovery(self.broker)
+        self.watchlist.notify = self._tg   # Telegram-Callback für Favoriten-Alerts
         self.spike_sensor = SpikeSensor(self.broker)
         self.trade_log: list[TradeSignal] = []
         self.position_highs: dict[str, float] = {}
