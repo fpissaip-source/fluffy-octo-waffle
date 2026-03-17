@@ -235,29 +235,49 @@ class WatchlistDiscovery:
     def should_update(self) -> bool:
         return time.time() - self.last_update > self.update_interval
 
-    def discover(self, market_open: bool) -> list[str]:
+    def discover(self, market_status: str) -> list[str]:
         """Fragt Gemini nach den besten Symbolen fuer die naechsten Stunden."""
         if not self.should_update():
             return self.dynamic_symbols
 
-        context = "US Aktienmarkt ist gerade geoeffnet." if market_open else \
-                  "US Aktienmarkt ist geschlossen, nur Crypto handelbar."
+        if market_status == "open":
+            context = "US Aktienmarkt ist GERADE OFFEN (reguläre Handelszeit 9:30–16:00 ET)."
+            stock_focus = (
+                "HAUPTFOKUS — Micro Caps / Penny Stocks (6 von 8 Symbolen):\n"
+                "- Market Cap unter 500 Mio USD\n"
+                "- Kurs zwischen $0.50 und $15\n"
+                "- Extrem hohes relatives Volumen (mind. 3x Durchschnitt heute)\n"
+                "- Starker Katalysator: News, PR, FDA, Earnings, Short Squeeze, Biotech-Daten\n"
+                "- Float unter 50 Mio Aktien bevorzugt (leichter zu bewegen)\n"
+                "- Beispiele: OTC-Aktien, Small-Cap NYSE/Nasdaq mit Momentum heute\n\n"
+                "NEBENSÄCHLICH — Large Caps als Absicherung (2 von 8 Symbolen):\n"
+                "- Aus S&P 500, klarer Trend, für stabile 1-5% Gewinne"
+            )
+        elif market_status == "extended":
+            context = "US Aktienmarkt ist in VOR-/NACHBÖRSENHANDEL (Pre-Market 4:00–9:30 oder After-Hours 16:00–20:00 ET)."
+            stock_focus = (
+                "HAUPTFOKUS — Aktien mit starken Katalysatoren für Extended Hours (6 von 8 Symbolen):\n"
+                "- Earnings-Überraschungen (Beat/Miss heute nach Börsenschluss oder vor Öffnung)\n"
+                "- FDA-Entscheide, M&A-News, PR-Nachrichten außerhalb Handelszeit\n"
+                "- Aktien mit Gap-Potential: vorbörslich mind. +5% oder -5%\n"
+                "- Handelbar auf Alpaca im Extended Hours Modus\n"
+                "- Small/Mid Cap bevorzugt (beweglicher)\n\n"
+                "NEBENSÄCHLICH — Crypto als 24/7 Alternative (2 von 8):\n"
+                "- BTCUSD, ETHUSD wenn starkes Momentum"
+            )
+        else:
+            context = "US Aktienmarkt ist GESCHLOSSEN (Nacht/Wochenende), nur Crypto handelbar."
+            stock_focus = (
+                "NUR Crypto-Symbole (8 von 8):\n"
+                "- BTCUSD, ETHUSD, SOLUSD und weitere mit starkem Momentum\n"
+                "- Höchstes relatives Volumen und Trendstärke"
+            )
 
-        prompt = f"""Du bist ein aggressiver Day-Trader spezialisiert auf Micro Caps und Penny Stocks. {context}
+        prompt = f"""Du bist ein aggressiver Day-Trader. {context}
 
-Welche 8 Symbole haben gerade das höchste Kurspotenzial für schnelle 10-50% Moves heute?
+Welche 8 Symbole haben gerade das höchste Kurspotenzial?
 
-HAUPTFOKUS — Micro Caps / Penny Stocks (6 von 8 Symbolen):
-- Market Cap unter 500 Mio USD
-- Kurs zwischen $0.50 und $15
-- Extrem hohes relatives Volumen (mind. 3x Durchschnitt heute)
-- Starker Katalysator: News, PR, FDA, Earnings, Short Squeeze, Biotech-Daten
-- Float unter 50 Mio Aktien bevorzugt (leichter zu bewegen)
-- Beispiele: OTC-Aktien, Small-Cap NYSE/Nasdaq mit Momentum heute
-
-NEBENSÄCHLICH — Large Caps als Absicherung (2 von 8 Symbolen):
-- Aus S&P 500, klarer Trend, für stabile 1-5% Gewinne
-- Bei geschlossenem Markt: nur Crypto (BTCUSD, ETHUSD)
+{stock_focus}
 
 Antworte NUR mit JSON:
 {{"symbols": ["SYM1", "SYM2", "SYM3", "SYM4", "SYM5", "SYM6", "SYM7", "SYM8"], "reasoning": "ein Satz"}}"""
@@ -300,18 +320,21 @@ Antworte NUR mit JSON:
 
         return self.dynamic_symbols
 
-    def get_active_watchlist(self, market_open: bool) -> list[str]:
+    def get_active_watchlist(self, market_status: str) -> list[str]:
         """
         Kombiniert Basis-Watchlist (.env) mit Gemini Vorschlaegen.
-        Nachts/Wochenende: nur Crypto-Symbole.
+        'closed' (Nacht/Wochenende): nur Crypto.
+        'open' + 'extended': Aktien + Crypto.
         """
-        dynamic = self.discover(market_open)
+        dynamic = self.discover(market_status)
 
-        if not market_open:
-            # Markt geschlossen — Basis-Watchlist für Extended Hours
-            return list(dict.fromkeys(Config.WATCHLIST + dynamic))[:15]
+        if market_status == "closed":
+            # Nur Crypto handeln wenn Markt + Extended geschlossen
+            crypto = [s for s in (Config.WATCHLIST + dynamic)
+                      if any(s.endswith(x) for x in ("USD", "BTC", "ETH", "SOL"))]
+            return list(dict.fromkeys(crypto))[:10]
 
-        # Markt offen: Basis + dynamisch, max 15
+        # open + extended: volles Universum
         combined = list(dict.fromkeys(Config.WATCHLIST + dynamic))
         return combined[:15]
 
@@ -634,13 +657,13 @@ class Engine:
             except Exception as e:
                 logger.error(f"Exit check error {symbol}: {e}")
 
-    def scan_once(self, market_open: bool):
-        active_watchlist = self.watchlist.get_active_watchlist(market_open)
+    def scan_once(self, market_status: str):
+        active_watchlist = self.watchlist.get_active_watchlist(market_status)
 
         logger.info(f"\n{'=' * 60}")
         logger.info(f"  SCAN @ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        status_str = "OFFEN" if market_open else "EXTENDED HOURS (vor/nachbörslich)"
-        logger.info(f"  Markt: {status_str}")
+        status_labels = {"open": "REGULÄR 9:30–16:00", "extended": "VOR-/NACHBÖRSE", "closed": "GESCHLOSSEN (Crypto)"}
+        logger.info(f"  Markt: {status_labels.get(market_status, market_status)}")
         logger.info(f"  Watchlist ({len(active_watchlist)}): {', '.join(active_watchlist)}")
         logger.info(f"  Regime: {self.risk.regime.value}")
         logger.info(f"{'=' * 60}")
@@ -671,14 +694,13 @@ class Engine:
         while True:
             try:
                 market_status = self.broker.get_market_status()
-                market_open = market_status == "open"
 
                 if market_status == "closed":
-                    logger.info("Boerse geschlossen (kein Extended Hours) — warte 5min...")
+                    logger.info("Boerse + Extended Hours geschlossen (Nacht/Wochenende) — warte 5min...")
                     time.sleep(300)
                     continue
 
-                self.scan_once(market_open)
+                self.scan_once(market_status)
 
             except KeyboardInterrupt:
                 logger.info("\nShutting down...")

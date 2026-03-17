@@ -113,9 +113,10 @@ class TradingTelegramBot:
             cash = broker.get_cash()
             bp = broker.get_buying_power()
             positions = broker.get_positions()
-            market_open = broker.is_market_open()
+            market_status = broker.get_market_status()
 
-            status_icon = "🟢" if market_open else "🔴"
+            status_icon = {"open": "🟢", "extended": "🟡", "closed": "🔴"}.get(market_status, "🔴")
+            status_label = {"open": "Open", "extended": "Extended Hours", "closed": "Closed"}.get(market_status, "Closed")
             mode = "PAPER" if Config.is_paper() else "LIVE"
             bot_status = "PAUSED" if self.is_paused else "RUNNING" if self.is_running else "IDLE"
 
@@ -123,7 +124,7 @@ class TradingTelegramBot:
                 f"<b>ACCOUNT STATUS</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"Mode:     <code>{mode}</code>\n"
-                f"Market:   {status_icon} {'Open' if market_open else 'Closed'}\n"
+                f"Market:   {status_icon} {status_label}\n"
                 f"Bot:      <code>{bot_status}</code>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"Equity:       <b>${equity:,.2f}</b>\n"
@@ -493,17 +494,15 @@ Antworte NUR mit JSON:
 
             try:
                 broker = self.engine.broker
-                market_open = broker.is_market_open()
+                market_status = broker.get_market_status()
 
                 # Exit checks (immer, auch nachts fuer Crypto-Positionen)
                 self.engine.check_exit_conditions()
 
-                # Dynamische Watchlist: Aktien wenn offen, Crypto 24/7
-                active_watchlist = self.engine.watchlist.get_active_watchlist(market_open)
-                logger.info(
-                    f"Scan {'(Markt offen)' if market_open else '(nur Crypto)'}: "
-                    f"{', '.join(active_watchlist)}"
-                )
+                # Dynamische Watchlist: open+extended=Aktien+Crypto, closed=nur Crypto
+                active_watchlist = self.engine.watchlist.get_active_watchlist(market_status)
+                status_labels = {"open": "REGULÄR", "extended": "VOR-/NACHBÖRSE", "closed": "NUR CRYPTO"}
+                logger.info(f"Scan [{status_labels.get(market_status, market_status)}]: {', '.join(active_watchlist)}")
 
                 for symbol in active_watchlist:
                     if not self.is_running:
@@ -547,8 +546,9 @@ Antworte NUR mit JSON:
                 logger.error(f"Scan loop error: {e}")
                 self.send_sync(f"⚠️ Scan error: {e}")
 
-            # Kuerzes Intervall nachts (nur Crypto, weniger aktiv)
-            interval = Config.SCAN_INTERVAL if self.engine.broker.is_market_open() else 120
+            # Intervall je nach Marktphase
+            ms = self.engine.broker.get_market_status()
+            interval = Config.SCAN_INTERVAL if ms == "open" else (60 if ms == "extended" else 120)
             time.sleep(interval)
 
         self.send_sync("🔴 Auto-Scan gestoppt.")
