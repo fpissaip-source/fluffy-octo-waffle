@@ -535,7 +535,7 @@ class Engine:
                     regime=self.risk.regime.value,
                 )
                 reasoning["cascade_level"] = signal.cascade_level
-                reasoning["express_lane"] = True  # Markierung: Trade war bereits ausgeführt
+                reasoning["express_lane"] = True
                 self.learner.save_autopsy(
                     symbol=signal.symbol,
                     regime=self.risk.regime.value,
@@ -545,11 +545,30 @@ class Engine:
                     vix=vix_value,
                     order_id=order_id,
                 )
-                verdict = "HÄTTE APPROVED" if reasoning.get("approved") else "HÄTTE GEBLOCKT"
-                logger.info(
-                    f"[EXPRESS LANE AUTOPSY] {signal.symbol}: Gemini {verdict} "
-                    f"({reasoning.get('probability_pct', 0)}%) — {reasoning.get('reason', '')}"
-                )
+
+                if reasoning.get("approved"):
+                    logger.info(
+                        f"[EXPRESS LANE ✓ HALTEN] {signal.symbol}: Gemini bestätigt "
+                        f"({reasoning.get('probability_pct', 0)}%) — {reasoning.get('reason', '')}"
+                    )
+                else:
+                    # Gemini sagt HOLD → Position sofort schließen
+                    logger.warning(
+                        f"[EXPRESS LANE ✗ VERKAUF] {signal.symbol}: Gemini empfiehlt Verkauf "
+                        f"({reasoning.get('probability_pct', 0)}%) — {reasoning.get('reason', '')} "
+                        f"| Risiken: {reasoning.get('risk_factors', [])}"
+                    )
+                    if self.broker.has_position(signal.symbol):
+                        self.broker.close_position(signal.symbol)
+                        self.position_highs.pop(signal.symbol, None)
+                        self.learner.record_exit(
+                            signal.symbol,
+                            self.broker.get_latest_price(signal.symbol) or price,
+                            f"Gemini-Veto nach Express Lane (async): {reasoning.get('reason', '')}",
+                        )
+                        logger.warning(f"[EXPRESS LANE ✗] {signal.symbol}: Position geschlossen")
+                    else:
+                        logger.info(f"[EXPRESS LANE ✗] {signal.symbol}: Position bereits geschlossen")
             except Exception as e:
                 logger.error(f"[EXPRESS LANE AUTOPSY] {signal.symbol}: Fehler: {e}")
 
@@ -679,15 +698,19 @@ class Engine:
         signal.qty = min(signal.qty, max_qty)
 
         # ── SCHICHT 2: Reasoning Layer ──
-        # EXPRESS LANE: 7/7 oder 6/7 → sofort handeln, Gemini läuft async im Hintergrund
-        if signal.cascade_level >= 6:
-            express_confidence = 0.85 if signal.cascade_level >= 7 else 0.75
-            express_prob = 85 if signal.cascade_level >= 7 else 75
+        # EXPRESS LANE: ab 5/7 → sofort handeln, Gemini prüft async ob HALTEN oder VERKAUFEN
+        if signal.cascade_level >= 5:
+            if signal.cascade_level >= 7:
+                express_confidence, express_prob = 0.85, 85
+            elif signal.cascade_level >= 6:
+                express_confidence, express_prob = 0.75, 75
+            else:  # 5/7
+                express_confidence, express_prob = 0.65, 65
             reasoning = {
                 "approved": True,
                 "confidence": express_confidence,
                 "probability_pct": express_prob,
-                "reason": f"Express Lane: {signal.cascade_level}/7 Kaskade — Gemini analysiert async",
+                "reason": f"Express Lane: {signal.cascade_level}/7 Kaskade — Gemini prüft async Halten/Verkaufen",
                 "risk_factors": [],
                 "raw": {},
                 "prompt": "",
@@ -695,10 +718,10 @@ class Engine:
             }
             logger.info(
                 f"[EXPRESS LANE] {signal.symbol}: {signal.cascade_level}/7 → "
-                f"Direkt-Execution ohne Gemini-Wartezeit"
+                f"Sofort-Execution, Gemini-Veto läuft im Hintergrund"
             )
         else:
-            # 4/7 oder 5/7 → normaler Gemini-Check (blockierend)
+            # 4/7 → normaler Gemini-Check (blockierend, kein Sofort-Trade)
             reasoning = self.reasoning.approve_trade(
                 symbol=signal.symbol,
                 signal=signal,
