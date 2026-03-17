@@ -117,14 +117,20 @@ Antworte NUR mit JSON:
             from google.genai import types as genai_types
 
             def _get_text(response):
-                """Extrahiert Text robust aus Gemini-Response (response.text kann None sein)."""
+                """Extrahiert Text robust aus Gemini-Response (response.text kann None sein).
+                Bei Thinking-Models (gemini-2.5-flash) werden Thought-Parts uebersprungen."""
                 try:
                     if response.text:
                         return response.text
                 except Exception:
                     pass
                 try:
-                    return response.candidates[0].content.parts[0].text or ""
+                    parts = response.candidates[0].content.parts
+                    # Thinking-Models geben Thought-Parts aus — diese ueberspringen
+                    for part in parts:
+                        if not getattr(part, 'thought', False) and part.text:
+                            return part.text
+                    return parts[0].text or ""
                 except Exception:
                     return ""
 
@@ -136,6 +142,7 @@ Antworte NUR mit JSON:
                         response_mime_type="application/json",
                         temperature=0.1,
                         max_output_tokens=300,
+                        thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
                     ),
                 )
 
