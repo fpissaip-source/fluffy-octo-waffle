@@ -701,6 +701,8 @@ class Engine:
         self.trade_log: list[TradeSignal] = []
         self.position_highs: dict[str, float] = {}
         self._async_threads: list[threading.Thread] = []
+        self._exit_lock = threading.Lock()
+        self._stop_event = threading.Event()
         # Telegram-Callback (optional): wird von TradingTelegramBot gesetzt
         self.notify: Optional[callable] = None
 
@@ -711,6 +713,18 @@ class Engine:
                 self.notify(text)
             except Exception as e:
                 logger.warning(f"Telegram notify failed: {e}")
+
+    def _exit_monitor_loop(self):
+        """Separater Thread: prüft offene Positionen alle 3s auf Stop/TP/Trailing."""
+        logger.info("[EXIT-MONITOR] Gestartet — prüft Positionen alle 3s")
+        while not self._stop_event.is_set():
+            try:
+                with self._exit_lock:
+                    self.check_exit_conditions()
+            except Exception as e:
+                logger.error(f"[EXIT-MONITOR] Fehler: {e}")
+            self._stop_event.wait(3)
+        logger.info("[EXIT-MONITOR] Gestoppt")
 
     def _async_gemini_autopsy(
         self,
@@ -1153,7 +1167,7 @@ class Engine:
         logger.info(f"  Regime: {self.risk.regime.value}")
         logger.info(f"{'=' * 60}")
 
-        self.check_exit_conditions()
+        # Exit-Conditions werden vom _exit_monitor_loop Thread alle 3s geprüft
 
         # Phase 1 — Parallel: Formel-Analyse + Alpaca-Daten für alle Symbole gleichzeitig
         signals: list[TradeSignal] = [None] * len(active_watchlist)
@@ -1196,23 +1210,33 @@ class Engine:
         logger.info(f"  Dynamic Discovery: alle 1h via Gemini")
         logger.info("=" * 60)
 
-        while True:
-            try:
-                market_status = self.broker.get_market_status()
+        # Exit-Monitor-Thread starten (alle 3s unabhängig vom Scan)
+        self._stop_event.clear()
+        exit_thread = threading.Thread(target=self._exit_monitor_loop, daemon=True, name="ExitMonitor")
+        exit_thread.start()
 
-                if market_status == "closed":
-                    logger.info("Boerse + Extended Hours geschlossen (Nacht/Wochenende) — warte 5min...")
-                    time.sleep(300)
-                    continue
+        try:
+            while True:
+                try:
+                    market_status = self.broker.get_market_status()
 
-                self.scan_once(market_status)  # spike_symbols ignoriert in standalone run()
+                    if market_status == "closed":
+                        logger.info("Boerse + Extended Hours geschlossen (Nacht/Wochenende) — warte 5min...")
+                        time.sleep(300)
+                        continue
 
-            except KeyboardInterrupt:
-                logger.info("\nShutting down...")
-                break
-            except Exception as e:
-                logger.error(f"Scan error: {e}")
+                    self.scan_once(market_status)
 
-            interval = Config.SCAN_INTERVAL
-            logger.info(f"Next scan in {interval}s...")
-            time.sleep(interval)
+                except KeyboardInterrupt:
+                    raise
+                except Exception as e:
+                    logger.error(f"Scan error: {e}")
+
+                interval = Config.SCAN_INTERVAL
+                logger.info(f"Next scan in {interval}s...")
+                time.sleep(interval)
+        except KeyboardInterrupt:
+            logger.info("\nShutting down...")
+        finally:
+            self._stop_event.set()
+            exit_thread.join(timeout=5)
