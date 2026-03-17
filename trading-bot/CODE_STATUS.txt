@@ -1,0 +1,85 @@
+════════════════════════════════════════════════════════════════
+  TRADING BOT — CODE STAND  (17.03.2026)
+════════════════════════════════════════════════════════════════
+
+BRANCH:  claude/continue-previous-work-gY8GD
+LETZTER COMMIT:  bf4236f — fix+feat: 2 kritische Bugs + Telegram Trade-Notifications
+
+────────────────────────────────────────────────────────────────
+  ARCHITEKTUR
+────────────────────────────────────────────────────────────────
+
+  Schicht 1 — Perception   : 7 quantitative Formeln
+  Schicht 2 — Reasoning    : Gemini (Pflicht-Veto vor jeder Order)
+  Schicht 3 — Execution    : Alpaca (Paper / Live)
+
+  Modus: Swing-Trading (1H-Timeframe, erweiterter News-Horizont)
+
+────────────────────────────────────────────────────────────────
+  DATEIEN  (4.859 Zeilen gesamt)
+────────────────────────────────────────────────────────────────
+
+  main.py              131  Zeilen  — Einstiegspunkt, CLI-Args
+  engine.py           1116  Zeilen  — Kern-Loop, Watchlist, Reasoning, Execution
+  screener.py          260  Zeilen  — SpikeSensor (WebSocket + REST-Fallback)
+  broker.py            248  Zeilen  — Alpaca API Wrapper
+  config.py             81  Zeilen  — Konfiguration / Env-Vars
+  adaptive.py          548  Zeilen  — Adaptives Lernen, Weight Decay
+  risk_manager.py      357  Zeilen  — ATR, Positionsgrößen, Drawdown
+  market_context.py    222  Zeilen  — SPY/VIX Regime-Erkennung
+  telegram_bot.py      594  Zeilen  — Telegram Steuerung + Trade-Alerts
+  dashboard.py         196  Zeilen  — Konsolen-Dashboard
+  api.py               153  Zeilen  — REST Hilfsfunktionen
+  formulas/
+    sentiment.py       495  Zeilen  — News-Sentiment + Gemini-Analyse
+    bayesian.py         87  Zeilen  — Bayesian Update
+    momentum.py        116  Zeilen  — Momentum-Filter
+    ev_gap.py           64  Zeilen  — Expected Value / Gap
+    kelly.py            68  Zeilen  — Kelly Criterion
+    kl_divergence.py    63  Zeilen  — KL-Divergence
+    stoikov.py          55  Zeilen  — Stoikov Order-Typ (informational)
+    __init__.py          5  Zeilen
+
+────────────────────────────────────────────────────────────────
+  SCAN-LOGIK
+────────────────────────────────────────────────────────────────
+
+  Universe:       ~300 Symbole (Small/Micro Caps, Biotech, Meme,
+                  EV, Crypto-Proxies, Cannabis, Short-Squeeze)
+  Spike-Trigger:  >3% intraday ODER >3× Durchschnittsvolumen
+  Watchlist-Update: alle 15 Minuten (Gemini wählt Top-15 aus Top-50)
+  Basis-Watchlist: NVDA, META, BTCUSD, ETHUSD (aus .env)
+  Kein Langfrist-Trading — fokussiert auf volatile Day/Swing-Kandidaten
+
+────────────────────────────────────────────────────────────────
+  KASKADEN-LOGIK (7 Filter)
+────────────────────────────────────────────────────────────────
+
+  6/6  → Express Lane: PERFEKT  — direkter Trade ohne Gemini
+  5/6  → Express Lane: STARK    — direkter Trade ohne Gemini
+  4/6  → Gemini Pflicht-Review
+  < 4  → SKIP
+
+  Stoikov: informational (zählt nicht in Kaskade, bestimmt Order-Typ)
+
+────────────────────────────────────────────────────────────────
+  BEHOBENE BUGS  (seit letztem Stand)
+────────────────────────────────────────────────────────────────
+
+  [CRITICAL] screener.py:143 — async def on_bar() → sync (WebSocket war tot)
+  [CRITICAL] engine.py:545  — cascade >= 7 unmöglich (max=6) → auf 6 korrigiert
+  [MAJOR]    engine.py       — HOLD/SELL Semantik invertiert → korrigiert
+  [MAJOR]    engine.py       — Reasoning Timeout blockierte Loop → 5s Timeout
+  [MAJOR]    adaptive.py     — Weight Decay korrekt implementiert
+  [MINOR]    formulas/       — Structured Outputs für Gemini aktiviert
+
+────────────────────────────────────────────────────────────────
+  OFFENE PUNKTE / BEKANNTE LIMITS
+────────────────────────────────────────────────────────────────
+
+  - UNIVERSE ist statisch (hartcodiert) — kein dynamisches Nachladen
+  - OTC/Penny Stocks in UNIVERSE ggf. nicht alle über Alpaca handelbar
+  - Keine Langfrist-Strategie implementiert (nur Day/Swing)
+  - Telegram-Alerts nur für neue Trades, kein PnL-Tracking in Chat
+
+════════════════════════════════════════════════════════════════
