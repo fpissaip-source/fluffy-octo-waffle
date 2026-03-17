@@ -115,11 +115,23 @@ Antworte NUR mit JSON:
 
         try:
             from google.genai import types as genai_types
+            response_schema = {
+                "type": "object",
+                "properties": {
+                    "decision": {"type": "string", "enum": ["BUY", "HOLD"]},
+                    "probability_pct": {"type": "integer"},
+                    "confidence": {"type": "number"},
+                    "reason": {"type": "string"},
+                    "risk_factors": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["decision", "probability_pct", "confidence", "reason", "risk_factors"],
+            }
             response = self.client.models.generate_content(
                 model=self.model,
                 contents=prompt,
                 config=genai_types.GenerateContentConfig(
                     response_mime_type="application/json",
+                    response_schema=response_schema,
                     temperature=0.1,
                     max_output_tokens=200,
                 ),
