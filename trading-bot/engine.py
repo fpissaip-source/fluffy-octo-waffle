@@ -121,9 +121,10 @@ Antworte NUR mit JSON:
                     model=self.model,
                     contents=contents,
                     config=genai_types.GenerateContentConfig(
+                        system_instruction="You are a JSON API. Output only valid JSON. Never write any text outside the JSON object.",
                         response_mime_type="application/json",
                         temperature=0.1,
-                        max_output_tokens=200,
+                        max_output_tokens=300,
                     ),
                 )
 
