@@ -76,10 +76,12 @@ class AlpacaBroker:
             end=end.strftime("%Y-%m-%d"),
             limit=limit,
         )
-        if not is_crypto:
-            kwargs["feed"] = "iex"
 
-        bars = self.api.get_bars(symbol, tf, **kwargs).df
+        if is_crypto:
+            bars = self.api.get_crypto_bars(symbol, tf, **kwargs).df
+        else:
+            kwargs["feed"] = "iex"
+            bars = self.api.get_bars(symbol, tf, **kwargs).df
 
         if bars.empty:
             logger.warning(f"No bars for {symbol}")
@@ -93,6 +95,9 @@ class AlpacaBroker:
 
     def get_latest_price(self, symbol: str) -> Optional[float]:
         try:
+            crypto_symbols = {"BTCUSD", "ETHUSD", "SOLUSD", "AVAXUSD", "LINKUSD"}
+            if symbol.upper() in crypto_symbols:
+                return float(self.api.get_latest_crypto_trade(symbol).price)
             return float(self.api.get_latest_trade(symbol).price)
         except Exception as e:
             logger.warning(f"Price failed {symbol}: {e}")
@@ -100,6 +105,18 @@ class AlpacaBroker:
 
     def get_snapshot(self, symbol: str) -> Optional[dict]:
         try:
+            crypto_symbols = {"BTCUSD", "ETHUSD", "SOLUSD", "AVAXUSD", "LINKUSD"}
+            if symbol.upper() in crypto_symbols:
+                snap = self.api.get_latest_crypto_bar(symbol)
+                price = float(snap.c)
+                return {
+                    "price": price,
+                    "bid": price,
+                    "ask": price,
+                    "spread": 0.0,
+                    "volume": int(snap.v) if snap.v else 0,
+                    "vwap": float(snap.vw) if snap.vw else None,
+                }
             snap = self.api.get_snapshot(symbol)
             return {
                 "price": float(snap.latest_trade.price),
@@ -115,13 +132,26 @@ class AlpacaBroker:
 
     def market_buy(self, symbol: str, qty: int) -> Optional[str]:
         try:
-            crypto = symbol.upper().endswith("USD") and not symbol.upper().endswith("BUSD")
-            tif = "gtc" if crypto else "day"
-            params = dict(symbol=symbol, qty=qty, side="buy", type="market", time_in_force=tif)
-            if not crypto:
-                params["extended_hours"] = False  # market orders nicht in extended hours
-            order = self.api.submit_order(**params)
-            logger.info(f"BUY {qty}x {symbol} @ MARKET -> Order {order.id}")
+            status = self.get_market_status()
+            if status == "extended":
+                # Extended hours: Limit-Order leicht über Marktpreis (0.1% Slippage)
+                price = self.get_latest_price(symbol)
+                if not price:
+                    logger.warning(f"Buy skipped {symbol}: no price available")
+                    return None
+                limit_price = round(price * 1.001, 2)
+                order = self.api.submit_order(
+                    symbol=symbol, qty=qty, side="buy",
+                    type="limit", time_in_force="day",
+                    limit_price=limit_price,
+                    extended_hours=True,
+                )
+                logger.info(f"BUY {qty}x {symbol} @ LIMIT ${limit_price:.2f} [EXT] -> Order {order.id}")
+            else:
+                order = self.api.submit_order(
+                    symbol=symbol, qty=qty, side="buy", type="market", time_in_force="day",
+                )
+                logger.info(f"BUY {qty}x {symbol} @ MARKET -> Order {order.id}")
             return order.id
         except Exception as e:
             logger.error(f"Buy failed {symbol}: {e}")
@@ -164,3 +194,23 @@ class AlpacaBroker:
 
     def is_market_open(self) -> bool:
         return self.api.get_clock().is_open
+
+    def get_market_status(self) -> str:
+        """Returns 'open', 'extended', or 'closed'."""
+        from datetime import timezone
+        clock = self.api.get_clock()
+        if clock.is_open:
+            return "open"
+        now = datetime.now(timezone.utc)
+        next_open = clock.next_open.replace(tzinfo=timezone.utc)
+        next_close = clock.next_close.replace(tzinfo=timezone.utc)
+        # Pre-market: 4h before open; After-hours: up to 4h after close
+        pre_market_start = next_open - timedelta(hours=5.5)
+        # After-hours: market closed but within same trading day window
+        prev_close = next_close - timedelta(hours=6.5)
+        after_hours_end = prev_close + timedelta(hours=4)
+        if pre_market_start <= now < next_open:
+            return "extended"
+        if prev_close < now <= after_hours_end:
+            return "extended"
+        return "closed"

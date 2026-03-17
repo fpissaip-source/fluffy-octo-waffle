@@ -239,10 +239,8 @@ Antworte NUR mit JSON:
         dynamic = self.discover(market_open)
 
         if not market_open:
-            # Markt geschlossen — nur Crypto aus Watchlist (kein Fallback auf SIP-Crypto)
-            crypto_base = [s for s in Config.WATCHLIST if is_crypto(s)]
-            crypto_dynamic = [s for s in dynamic if is_crypto(s)]
-            return list(dict.fromkeys(crypto_base + crypto_dynamic))[:10]
+            # Markt geschlossen — Basis-Watchlist für Extended Hours
+            return list(dict.fromkeys(Config.WATCHLIST + dynamic))[:15]
 
         # Markt offen: Basis + dynamisch, max 15
         combined = list(dict.fromkeys(Config.WATCHLIST + dynamic))
@@ -572,7 +570,8 @@ class Engine:
 
         logger.info(f"\n{'=' * 60}")
         logger.info(f"  SCAN @ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        logger.info(f"  Markt: {'OFFEN' if market_open else 'GESCHLOSSEN (nur Crypto)'}")
+        status_str = "OFFEN" if market_open else "EXTENDED HOURS (vor/nachbörslich)"
+        logger.info(f"  Markt: {status_str}")
         logger.info(f"  Watchlist ({len(active_watchlist)}): {', '.join(active_watchlist)}")
         logger.info(f"  Regime: {self.risk.regime.value}")
         logger.info(f"{'=' * 60}")
@@ -602,11 +601,13 @@ class Engine:
 
         while True:
             try:
-                market_open = self.broker.is_market_open()
+                market_status = self.broker.get_market_status()
+                market_open = market_status == "open"
 
-                if not market_open:
-                    # Markt zu: nur Crypto scannen (echte 24/7 Assets)
-                    logger.info("Boerse geschlossen — scanne nur Crypto...")
+                if market_status == "closed":
+                    logger.info("Boerse geschlossen (kein Extended Hours) — warte 5min...")
+                    time.sleep(300)
+                    continue
 
                 self.scan_once(market_open)
 
@@ -616,6 +617,6 @@ class Engine:
             except Exception as e:
                 logger.error(f"Scan error: {e}")
 
-            interval = Config.SCAN_INTERVAL if self.broker.is_market_open() else 120
+            interval = Config.SCAN_INTERVAL
             logger.info(f"Next scan in {interval}s...")
             time.sleep(interval)
