@@ -29,8 +29,18 @@ def evaluate(bars: pd.DataFrame, equity: float = 10000.0, **kwargs) -> dict:
     avg_gain = gains.mean() if len(gains) > 0 else 0.001
     avg_loss = abs(losses.mean()) if len(losses) > 0 else 0.001
 
-    # Slippage & Gebuehren abziehen (Kosten pro Seite: Kauf + Verkauf)
-    cost_pct = (Config.SLIPPAGE_BPS + Config.FEE_BPS) / 10000 * 2  # je Roundtrip
+    # Dynamische Slippage: Penny Stocks / OTC haben viel hoehere Kosten
+    spread = kwargs.get("spread", 0.0)
+    current_price = bars["close"].iloc[-1]
+    if spread and spread > 0 and current_price > 0:
+        slippage_pct = (spread / current_price)   # realer Bid-Ask-Spread
+    elif current_price < 1.0:
+        slippage_pct = 0.01   # 100 bps fuer Sub-Dollar Stocks
+    elif current_price < 5.0:
+        slippage_pct = 0.005  # 50 bps fuer Penny Stocks
+    else:
+        slippage_pct = Config.SLIPPAGE_BPS / 10000  # Standard (10 bps)
+    cost_pct = (slippage_pct + Config.FEE_BPS / 10000) * 2  # Roundtrip
     adj_gain = max(avg_gain - cost_pct, 0.0001)
     adj_loss = avg_loss + cost_pct
     payoff = min(adj_gain / adj_loss, 10.0)
@@ -53,5 +63,6 @@ def evaluate(bars: pd.DataFrame, equity: float = 10000.0, **kwargs) -> dict:
             "bet_size_usd": round(bet_size, 2),
             "fraction_used": f"{Config.KELLY_FRACTION}x Kelly",
             "cost_pct": f"{cost_pct*100:.3f}%",
+            "slippage_bps": round(slippage_pct * 10000, 1),
         },
     }

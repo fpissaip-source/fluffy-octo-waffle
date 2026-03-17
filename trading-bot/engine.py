@@ -56,6 +56,42 @@ class ReasoningLayer:
         self.market_ctx = MarketContext()
         logger.info(f"ReasoningLayer initialisiert: {self.model} (min_confidence={self.min_confidence})")
 
+    def _cascade_fallback(self, symbol: str, cascade_level: int, reason: str) -> dict:
+        """
+        Fallback wenn Gemini nicht antwortet (Timeout / API-Fehler).
+        6/7 oder 7/7 → Auto-Approve (starkes Signal auch ohne LLM).
+        4/7 oder 5/7 → Blockiert (zu schwach fuer Blind-Trade).
+        """
+        if cascade_level >= 6:
+            logger.warning(
+                f"[REASONING] {symbol}: {reason} → AUTO-APPROVE "
+                f"wegen Kaskade {cascade_level}/7"
+            )
+            return {
+                "approved": True,
+                "confidence": 0.70,
+                "probability_pct": 70,
+                "reason": f"Gemini-Fallback: Auto-Approve wegen {cascade_level}/7 Kaskade",
+                "risk_factors": ["gemini_timeout"],
+                "raw": {},
+                "prompt": "",
+                "raw_response": "FALLBACK",
+            }
+        logger.warning(
+            f"[REASONING] {symbol}: {reason} → BLOCKIERT "
+            f"wegen Kaskade {cascade_level}/7 (zu schwach)"
+        )
+        return {
+            "approved": False,
+            "confidence": 0.0,
+            "probability_pct": 0,
+            "reason": f"Gemini-Fallback: Blockiert wegen {cascade_level}/7 Kaskade",
+            "risk_factors": ["gemini_timeout"],
+            "raw": {},
+            "prompt": "",
+            "raw_response": "FALLBACK",
+        }
+
     def approve_trade(
         self,
         symbol: str,
@@ -66,7 +102,8 @@ class ReasoningLayer:
     ) -> dict:
         """
         Fragt Gemini ob der Trade ausgefuehrt werden soll.
-        Returns: {"approved": bool, "confidence": float, "reason": str}
+        Timeout: 5 Sekunden. Bei Timeout/Fehler greift Kaskaden-Fallback.
+        Returns: {"approved": bool, "confidence": float, "reason": str, "prompt": str, "raw_response": str}
         """
         formula_summary = "\n".join(
             f"  - {name}: signal={r['signal']:.3f} {'PASS' if r['passed'] else 'FAIL'}"
@@ -80,7 +117,6 @@ class ReasoningLayer:
         macro_score = sentiment_details.get("macro", 0)
 
         market_context_str = self.market_ctx.format_for_prompt(symbol)
-
         cascade_info = f"{signal.cascade_label}" if signal.cascade_level else "unbekannt"
 
         prompt = f"""Du bist ein erfahrener quantitativer Trader. Analysiere dieses Trading-Signal und triff eine finale Kaufentscheidung.
@@ -115,104 +151,113 @@ Beruecksichtige: Kaskaden-Level, VIX, Sektor-Trend, Sentiment, Positionsgroesse.
 Antworte NUR mit JSON:
 {{"decision": "BUY" oder "HOLD", "probability_pct": 0-100, "confidence": 0.0-1.0, "reason": "ein Satz auf Deutsch", "risk_factors": ["Faktor1", "Faktor2"]}}"""
 
-        try:
-            from google.genai import types as genai_types
+        def _do_call() -> dict:
+            try:
+                from google.genai import types as genai_types
 
-            def _get_text(response):
-                """Extrahiert Text robust aus Gemini-Response (response.text kann None sein).
-                Bei Thinking-Models (gemini-2.5-flash) werden Thought-Parts uebersprungen."""
-                try:
-                    if response.text:
-                        return response.text
-                except Exception:
-                    pass
-                try:
-                    parts = response.candidates[0].content.parts
-                    # Thinking-Models geben Thought-Parts aus — diese ueberspringen
-                    for part in parts:
-                        if not getattr(part, 'thought', False) and part.text:
-                            return part.text
-                    return parts[0].text or ""
-                except Exception:
-                    return ""
+                def _get_text(response):
+                    try:
+                        if response.text:
+                            return response.text
+                    except Exception:
+                        pass
+                    try:
+                        parts = response.candidates[0].content.parts
+                        for part in parts:
+                            if not getattr(part, 'thought', False) and part.text:
+                                return part.text
+                        return parts[0].text or ""
+                    except Exception:
+                        return ""
 
-            def _call_gemini(contents):
-                return self.client.models.generate_content(
-                    model=self.model,
-                    contents=contents,
-                    config=genai_types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        temperature=0.1,
-                        max_output_tokens=300,
-                        thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
-                    ),
-                )
+                def _call_gemini(contents):
+                    return self.client.models.generate_content(
+                        model=self.model,
+                        contents=contents,
+                        config=genai_types.GenerateContentConfig(
+                            response_mime_type="application/json",
+                            temperature=0.1,
+                            max_output_tokens=300,
+                            thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
+                        ),
+                    )
 
-            def _extract_json(text):
-                try:
-                    return json.loads(text)
-                except json.JSONDecodeError:
-                    pass
-                depth, start = 0, None
-                for i, c in enumerate(text):
-                    if c == '{':
-                        if depth == 0:
-                            start = i
-                        depth += 1
-                    elif c == '}':
-                        depth -= 1
-                        if depth == 0 and start is not None:
-                            try:
-                                return json.loads(text[start:i + 1])
-                            except json.JSONDecodeError:
-                                pass
-                            break
-                return None
+                def _extract_json(text):
+                    try:
+                        return json.loads(text)
+                    except json.JSONDecodeError:
+                        pass
+                    depth, start = 0, None
+                    for i, c in enumerate(text):
+                        if c == '{':
+                            if depth == 0:
+                                start = i
+                            depth += 1
+                        elif c == '}':
+                            depth -= 1
+                            if depth == 0 and start is not None:
+                                try:
+                                    return json.loads(text[start:i + 1])
+                                except json.JSONDecodeError:
+                                    pass
+                                break
+                    return None
 
-            response = _call_gemini(prompt)
-            text = _get_text(response)
-            result = _extract_json(text)
+                response = _call_gemini(prompt)
+                raw_text = _get_text(response)
+                result = _extract_json(raw_text)
 
-            # Versuch 2: Retry mit explizitem JSON-only Prompt
-            if not result:
-                logger.warning(f"[REASONING] {symbol}: Gemini-Antwort nicht parsebar: {text[:300]!r} — Retry...")
-                retry_prompt = (
-                    'Output ONLY raw JSON, no text before or after. Example:\n'
-                    '{"decision":"HOLD","probability_pct":40,"confidence":0.4,"reason":"...","risk_factors":[]}\n\n'
-                    'Now output the JSON for this context:\n' + prompt
-                )
-                response2 = _call_gemini(retry_prompt)
-                text2 = _get_text(response2)
-                result = _extract_json(text2)
+                if not result:
+                    logger.warning(f"[REASONING] {symbol}: Gemini-Antwort nicht parsebar — Retry...")
+                    retry_prompt = (
+                        'Output ONLY raw JSON, no text before or after. Example:\n'
+                        '{"decision":"HOLD","probability_pct":40,"confidence":0.4,"reason":"...","risk_factors":[]}\n\n'
+                        'Now output the JSON for this context:\n' + prompt
+                    )
+                    response2 = _call_gemini(retry_prompt)
+                    raw_text = _get_text(response2)
+                    result = _extract_json(raw_text)
 
-            if not result:
-                logger.warning(f"[REASONING] {symbol}: Gemini-Antwort nicht parsebar nach Retry: {text[:300]!r}")
+                if result:
+                    approved = (
+                        result.get("decision", "HOLD") == "BUY"
+                        and float(result.get("confidence", 0)) >= self.min_confidence
+                    )
+                    prob_pct = int(result.get("probability_pct", round(float(result.get("confidence", 0)) * 100)))
+                    logger.info(
+                        f"[REASONING] {symbol}: {result.get('decision')} "
+                        f"Wahrscheinlichkeit={prob_pct}% | {result.get('reason', '')}"
+                    )
+                    return {
+                        "approved": approved,
+                        "confidence": float(result.get("confidence", 0)),
+                        "probability_pct": prob_pct,
+                        "reason": result.get("reason", ""),
+                        "risk_factors": result.get("risk_factors", []),
+                        "raw": result,
+                        "prompt": prompt,
+                        "raw_response": raw_text,
+                    }
 
-            if result:
-                approved = (
-                    result.get("decision", "HOLD") == "BUY"
-                    and float(result.get("confidence", 0)) >= self.min_confidence
-                )
-                prob_pct = int(result.get("probability_pct", round(float(result.get("confidence", 0)) * 100)))
-                logger.info(
-                    f"[REASONING] {symbol}: {result.get('decision')} "
-                    f"Wahrscheinlichkeit={prob_pct}% | {result.get('reason', '')}"
-                )
-                return {
-                    "approved": approved,
-                    "confidence": float(result.get("confidence", 0)),
-                    "probability_pct": prob_pct,
-                    "reason": result.get("reason", ""),
-                    "risk_factors": result.get("risk_factors", []),
-                    "raw": result,
-                }
+                logger.warning(f"[REASONING] {symbol}: JSON parse error nach Retry")
+                return {"approved": False, "confidence": 0.0, "reason": "JSON parse error",
+                        "risk_factors": [], "raw": {}, "prompt": prompt, "raw_response": raw_text}
 
-            logger.warning(f"[REASONING] {symbol}: Konnte JSON nicht parsen — Trade BLOCKIERT")
-            return {"approved": False, "confidence": 0.0, "reason": "JSON parse error", "risk_factors": []}
+            except Exception as e:
+                logger.error(f"[REASONING] {symbol}: Gemini Fehler: {e}")
+                return {"approved": False, "confidence": 0.0, "reason": f"API error: {e}",
+                        "risk_factors": [], "raw": {}, "prompt": prompt, "raw_response": str(e)}
 
-        except Exception as e:
-            logger.error(f"[REASONING] {symbol}: Gemini Fehler — Trade BLOCKIERT: {e}")
-            return {"approved": False, "confidence": 0.0, "reason": f"API error: {e}", "risk_factors": []}
+        # ── 5-Sekunden Timeout — blockiert nicht bei hängendem Gemini ──
+        from concurrent.futures import TimeoutError as FuturesTimeoutError
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(_do_call)
+            try:
+                return future.result(timeout=5)
+            except FuturesTimeoutError:
+                return self._cascade_fallback(symbol, signal.cascade_level, "Gemini-Timeout (5s)")
+            except Exception as e:
+                return self._cascade_fallback(symbol, signal.cascade_level, f"Gemini-Exception: {e}")
 
 
 # ═══════════════════════════════════════════════════════
@@ -238,6 +283,50 @@ class WatchlistDiscovery:
     def should_update(self) -> bool:
         return time.time() - self.last_update > self.update_interval
 
+    def _get_top_candidates(self, market_status: str) -> list[str]:
+        """
+        Holt Top-50 handelbare Kandidaten direkt via Alpaca-Batch-Snapshots.
+        Sortiert nach pct_move * volume (kombinierter Momentum-Score).
+        Kein Halluzinieren: Nur Ticker die WIRKLICH handeln kommen durch.
+        """
+        if not self.broker:
+            return []
+
+        if market_status == "closed":
+            from engine import CRYPTO_SYMBOLS
+            return list(CRYPTO_SYMBOLS)
+
+        try:
+            from screener import SpikeSensor
+            universe = SpikeSensor.UNIVERSE
+            snaps = self.broker.get_snapshots_batch(universe)
+
+            candidates = []
+            for symbol, snap in snaps.items():
+                try:
+                    daily = snap.daily_bar
+                    if not daily:
+                        continue
+                    open_p = float(daily.open)
+                    close_p = float(daily.close)
+                    volume = int(daily.volume)
+                    if open_p <= 0 or close_p <= 0 or volume == 0:
+                        continue
+                    pct_move = abs((close_p - open_p) / open_p)
+                    candidates.append((symbol, pct_move, volume))
+                except Exception:
+                    continue
+
+            # Kombinierter Score: relative Bewegung * Volumen
+            candidates.sort(key=lambda x: x[1] * x[2], reverse=True)
+            top50 = [s for s, _, _ in candidates[:50]]
+            logger.info(f"[WATCHLIST] Alpaca Top-50 nach Momentum×Vol: {top50[:10]}...")
+            return top50
+
+        except Exception as e:
+            logger.warning(f"[WATCHLIST] Top-Kandidaten Fehler: {e}")
+            return []
+
     def _verify_symbols(self, symbols: list[str]) -> list[str]:
         """Prueft ob Gemini-Symbole wirklich auf Alpaca handelbar sind (Volumen > 0)."""
         if not self.broker:
@@ -255,48 +344,45 @@ class WatchlistDiscovery:
         return verified
 
     def discover(self, market_status: str) -> list[str]:
-        """Fragt Gemini nach den besten Symbolen fuer die naechsten Stunden."""
+        """
+        Invertierte Logik: Alpaca liefert Top-50 (echte Daten),
+        Gemini waehlt daraus die 8 besten basierend auf News/Katalysatoren.
+        Kein Halluzinieren — nur Ticker die wirklich handeln.
+        """
         if not self.should_update():
             return self.dynamic_symbols
 
-        if market_status == "open":
-            context = "US Aktienmarkt ist GERADE OFFEN (reguläre Handelszeit 9:30–16:00 ET)."
-            stock_focus = (
-                "HAUPTFOKUS — Micro Caps / Penny Stocks (6 von 8 Symbolen):\n"
-                "- Market Cap unter 500 Mio USD\n"
-                "- Kurs zwischen $0.50 und $15\n"
-                "- Extrem hohes relatives Volumen (mind. 3x Durchschnitt heute)\n"
-                "- Starker Katalysator: News, PR, FDA, Earnings, Short Squeeze, Biotech-Daten\n"
-                "- Float unter 50 Mio Aktien bevorzugt (leichter zu bewegen)\n"
-                "- Beispiele: OTC-Aktien, Small-Cap NYSE/Nasdaq mit Momentum heute\n\n"
-                "NEBENSÄCHLICH — Large Caps als Absicherung (2 von 8 Symbolen):\n"
-                "- Aus S&P 500, klarer Trend, für stabile 1-5% Gewinne"
-            )
-        elif market_status == "extended":
-            context = "US Aktienmarkt ist in VOR-/NACHBÖRSENHANDEL (Pre-Market 4:00–9:30 oder After-Hours 16:00–20:00 ET)."
-            stock_focus = (
-                "HAUPTFOKUS — Aktien mit starken Katalysatoren für Extended Hours (6 von 8 Symbolen):\n"
-                "- Earnings-Überraschungen (Beat/Miss heute nach Börsenschluss oder vor Öffnung)\n"
-                "- FDA-Entscheide, M&A-News, PR-Nachrichten außerhalb Handelszeit\n"
-                "- Aktien mit Gap-Potential: vorbörslich mind. +5% oder -5%\n"
-                "- Handelbar auf Alpaca im Extended Hours Modus\n"
-                "- Small/Mid Cap bevorzugt (beweglicher)\n\n"
-                "NEBENSÄCHLICH — Crypto als 24/7 Alternative (2 von 8):\n"
-                "- BTCUSD, ETHUSD wenn starkes Momentum"
-            )
-        else:
-            context = "US Aktienmarkt ist GESCHLOSSEN (Nacht/Wochenende), nur Crypto handelbar."
-            stock_focus = (
-                "NUR Crypto-Symbole (8 von 8):\n"
-                "- BTCUSD, ETHUSD, SOLUSD und weitere mit starkem Momentum\n"
-                "- Höchstes relatives Volumen und Trendstärke"
-            )
+        # Schritt 1: Echte Kandidaten von Alpaca holen
+        candidates = self._get_top_candidates(market_status)
 
-        prompt = f"""Du bist ein aggressiver Day-Trader. {context}
+        if not candidates:
+            logger.warning("[WATCHLIST] Keine Alpaca-Kandidaten — behalte letzte Symbole")
+            return self.dynamic_symbols
 
-Welche 8 Symbole haben gerade das höchste Kurspotenzial?
+        if market_status == "closed":
+            self.dynamic_symbols = candidates[:8]
+            self.last_update = time.time()
+            return self.dynamic_symbols
 
-{stock_focus}
+        candidates_str = ", ".join(candidates[:50])
+        context_map = {
+            "open": "US Aktienmarkt ist GERADE OFFEN (9:30–16:00 ET).",
+            "extended": "US Aktienmarkt ist in VOR-/NACHBÖRSENHANDEL.",
+        }
+        context = context_map.get(market_status, "")
+
+        # Schritt 2: Gemini waehlt aus echten Kandidaten (kein Erfinden)
+        prompt = f"""Du bist ein erfahrener Day-Trader. {context}
+
+Hier sind die 50 aktivsten US-Aktien der letzten Stunde nach Volumen und Kurs-Bewegung (echte Alpaca-Daten):
+{candidates_str}
+
+Wähle die 8 besten aus DIESER LISTE basierend auf deinem Wissen über:
+- Aktuelle News und Katalysatoren (Earnings, FDA, M&A, Short Squeeze)
+- Momentum und Trendstärke
+- Liquidität und Handelbarkeit
+
+WICHTIG: Nur Symbole aus der obigen Liste verwenden — keine anderen erfinden.
 
 Antworte NUR mit JSON:
 {{"symbols": ["SYM1", "SYM2", "SYM3", "SYM4", "SYM5", "SYM6", "SYM7", "SYM8"], "reasoning": "ein Satz"}}"""
@@ -328,18 +414,26 @@ Antworte NUR mit JSON:
                         except json.JSONDecodeError:
                             pass
                         break
+
             if result:
+                # Nur Symbole aus der Kandidaten-Liste akzeptieren (kein Halluzinieren)
+                candidate_set = set(candidates)
                 raw_symbols = [s.upper().strip() for s in result.get("symbols", [])]
-                symbols = self._verify_symbols(raw_symbols)
-                if len(symbols) < len(raw_symbols):
-                    logger.info(f"[WATCHLIST] Volumen-Filter: {len(raw_symbols)} → {len(symbols)} Symbole")
-                self.dynamic_symbols = symbols[:8]
+                validated = [s for s in raw_symbols if s in candidate_set]
+                hallucinated = [s for s in raw_symbols if s not in candidate_set]
+                if hallucinated:
+                    logger.warning(f"[WATCHLIST] Gemini halluzinierte {len(hallucinated)} Symbole → verworfen: {hallucinated}")
+                self.dynamic_symbols = validated[:8]
                 self.last_update = time.time()
-                logger.info(f"[WATCHLIST] Neue Symbole: {self.dynamic_symbols} | {result.get('reasoning', '')}")
+                logger.info(f"[WATCHLIST] Neue Symbole ({len(self.dynamic_symbols)}): {self.dynamic_symbols} | {result.get('reasoning', '')}")
                 return self.dynamic_symbols
+
         except Exception as e:
             logger.warning(f"[WATCHLIST] Discovery fehlgeschlagen: {e}")
 
+        # Fallback: direkt Top-8 aus Alpaca-Daten nehmen
+        self.dynamic_symbols = candidates[:8]
+        self.last_update = time.time()
         return self.dynamic_symbols
 
     def get_active_watchlist(self, market_status: str) -> list[str]:
@@ -467,6 +561,9 @@ class Engine:
         positions = self.broker.get_positions()
         inventory_skew = 0.3 if symbol in positions else 0.0
 
+        # Spread fuer dynamische Slippage-Berechnung
+        spread = snapshot.get("spread", 0.0) if snapshot else 0.0
+
         # ── F1: Momentum ──
         try:
             r1 = momentum.evaluate(bars, threshold=Config.MIN_MOMENTUM_SCORE)
@@ -476,14 +573,14 @@ class Engine:
 
         # ── F2: Kelly ──
         try:
-            r2 = kelly.evaluate(bars, equity=equity)
+            r2 = kelly.evaluate(bars, equity=equity, spread=spread)
             signal.add_result(r2)
         except Exception as e:
             signal.add_result({"name": "Kelly", "signal": 0, "passed": False, "details": {"error": str(e)}})
 
         # ── F3: EV-Gap ──
         try:
-            r3 = ev_gap.evaluate(bars, win_prob=0.55)
+            r3 = ev_gap.evaluate(bars, win_prob=0.55, spread=spread)
             signal.add_result(r3)
         except Exception as e:
             signal.add_result({"name": "EV-Gap", "signal": 0, "passed": False, "details": {"error": str(e)}})
@@ -628,6 +725,23 @@ class Engine:
                 sentiment_score=sentiment_score,
                 entry_price=price,
                 qty=signal.qty,
+            )
+
+            # ── Trade Autopsy: vollstaendiger State-Dump fuer Post-Mortem Debugging ──
+            try:
+                vix_data = self.reasoning.market_ctx.vix.get()
+                vix_value = vix_data.get("vix")
+            except Exception:
+                vix_value = None
+            reasoning["cascade_level"] = signal.cascade_level
+            self.learner.save_autopsy(
+                symbol=signal.symbol,
+                regime=self.risk.regime.value,
+                formula_results=signal.results,
+                reasoning=reasoning,
+                price=price,
+                vix=vix_value,
+                order_id=order_id,
             )
 
         return order_id

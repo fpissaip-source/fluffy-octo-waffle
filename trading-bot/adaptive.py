@@ -32,6 +32,7 @@ logger = logging.getLogger("bot.adaptive")
 DATA_DIR = Path(__file__).parent / "data"
 TRADE_LOG_FILE = DATA_DIR / "trade_history.json"
 WEIGHTS_FILE = DATA_DIR / "formula_weights.json"
+AUTOPSY_DIR = Path(__file__).parent / "autopsy"
 
 
 # ═══════════════════════════════════════════════════════
@@ -362,6 +363,64 @@ class AdaptiveLearner:
             "reason": f"Score too low ({score:.2f}) or not enough data",
             "score": score,
         }
+
+    # ── Trade Autopsy ───────────────────────────────────
+
+    def save_autopsy(
+        self,
+        symbol: str,
+        regime: str,
+        formula_results: dict,
+        reasoning: dict,
+        price: float = 0.0,
+        vix: float = None,
+        order_id: str = "",
+    ):
+        """
+        Speichert vollstaendigen State-Dump pro ausgefuehrtem Trade als JSON.
+        Datei: autopsy/YYYYMMDD_HHMMSS_SYMBOL.json
+
+        Enthaelt: Gemini-Prompt, Gemini-Antwort, VIX, alle 7 Formel-Rohergebnisse,
+        Kaskaden-Level, Order-ID. Ermoeglicht Post-Mortem Debugging.
+        """
+        try:
+            AUTOPSY_DIR.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = AUTOPSY_DIR / f"{ts}_{symbol}.json"
+
+            data = {
+                "timestamp": datetime.now().isoformat(),
+                "symbol": symbol,
+                "regime": regime,
+                "price": price,
+                "vix": vix,
+                "order_id": order_id,
+                "cascade_level": reasoning.get("cascade_level"),
+                "gemini_approved": reasoning.get("approved"),
+                "gemini_confidence": reasoning.get("confidence"),
+                "gemini_probability_pct": reasoning.get("probability_pct"),
+                "gemini_reason": reasoning.get("reason", ""),
+                "gemini_risk_factors": reasoning.get("risk_factors", []),
+                "gemini_prompt": reasoning.get("prompt", ""),
+                "gemini_raw_response": reasoning.get("raw_response", ""),
+                "gemini_parsed_result": reasoning.get("raw", {}),
+                "formula_results": {
+                    name: {
+                        "signal": r.get("signal"),
+                        "passed": r.get("passed"),
+                        "details": r.get("details", {}),
+                    }
+                    for name, r in formula_results.items()
+                },
+            }
+
+            with open(filename, "w") as f:
+                json.dump(data, f, indent=2, default=str)
+
+            logger.info(f"[AUTOPSY] Gespeichert: {filename.name}")
+
+        except Exception as e:
+            logger.error(f"[AUTOPSY] Speichern fehlgeschlagen fuer {symbol}: {e}")
 
     # ── Performance Stats ───────────────────────────────
 
