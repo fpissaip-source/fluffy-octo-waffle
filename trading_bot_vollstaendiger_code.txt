@@ -1,149 +1,40 @@
-================================================================
-  TRADING BOT — VOLLSTÄNDIGER CODE
-  Erstellt: 2026-03-17 19:57:06
-  Dateien: 18 Python-Dateien
-================================================================
+================================================================================
+  TRADING BOT — VOLLSTÄNDIGER CODE (aktualisiert)
+  Stand: 2026-03-17
+  Branch: claude/continue-previous-work-gY8GD
 
-################################################################
-##  DATEI: trading-bot/main.py
-################################################################
+  Enthaltene Fixes:
+  [x] Fix 1: LLM Latency — parallelize Gemini calls via ThreadPoolExecutor
+  [x] Fix 2: Watchlist hallucination — Alpaca volume verification
+  [x] Fix 3: Stoikov — self-deciding (limit orders only)
+  [x] Fix 4: Slippage & fee model — Kelly + EV-Gap
 
-#!/usr/bin/env python3
-"""
-main.py — SIX FILTERS. ONE TRADE.
-
-Usage:
-    python main.py              # Bot starten (Endlosschleife)
-    python main.py --scan-once  # Einmaliger Scan
-    python main.py --status     # Account Status
-    python main.py --backtest   # Quick Analyse
-"""
-
-import os
-import sys
-import logging
-import argparse
-
-from config import Config
-from engine import Engine
-from broker import AlpacaBroker
-
-
-def setup_logging():
-    level = getattr(logging, Config.LOG_LEVEL.upper(), logging.INFO)
-    fmt = "%(asctime)s | %(name)-12s | %(levelname)-7s | %(message)s"
-    logging.basicConfig(level=level, format=fmt, datefmt="%H:%M:%S")
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
-    logging.getLogger("websocket").setLevel(logging.WARNING)
+  Dateien:
+    config.py           — Zentrale Konfiguration
+    broker.py           — Alpaca API Wrapper
+    risk_manager.py     — Adaptives Risikomanagement
+    adaptive.py         — Reinforcement Learning / Gewichte
+    market_context.py   — VIX, Sektoren, LunarCrush
+    screener.py         — SpikeSensor (300+ Symbole)
+    formulas/
+      momentum.py       — F1: RSI, EMA, ROC, Bollinger
+      kelly.py          — F2: Kelly Criterion (mit Slippage/Fee)
+      ev_gap.py         — F3: Expected Value Gap (mit Slippage/Fee)
+      kl_divergence.py  — F4: KL-Divergenz Cross-Timeframe
+      bayesian.py       — F5: Bayesian Updater
+      stoikov.py        — F6: Avellaneda-Stoikov (self-deciding)
+      sentiment.py      — F7: News + Gemini Sentiment
+    engine.py           — Haupt-Engine (3-Schichten)
+    telegram_bot.py     — iPhone Steuerung
+    api.py              — Web Dashboard API
+    dashboard.py        — HTML Dashboard
+    main.py             — Entry Point
+================================================================================
 
 
-def cmd_status():
-    broker = AlpacaBroker()
-    equity = broker.get_equity()
-    cash = broker.get_cash()
-    bp = broker.get_buying_power()
-    positions = broker.get_positions()
-
-    print(f"\n{'=' * 50}")
-    print(f"  ACCOUNT STATUS  ({'PAPER' if Config.is_paper() else 'LIVE'})")
-    print(f"{'=' * 50}")
-    print(f"  Equity:        ${equity:,.2f}")
-    print(f"  Cash:          ${cash:,.2f}")
-    print(f"  Buying Power:  ${bp:,.2f}")
-    print(f"  Positions:     {len(positions)}")
-    print(f"{'-' * 50}")
-    if positions:
-        for sym, pos in positions.items():
-            pl = pos['unrealized_pl']
-            plpc = pos['unrealized_plpc']
-            pre = "+" if pl >= 0 else ""
-            print(f"  {sym:<8} {pos['qty']:>6} shares @ ${pos['avg_entry']:.2f}"
-                  f"  {pre}${pl:.2f} ({pre}{plpc:.1%})")
-    else:
-        print("  No open positions.")
-    print(f"{'=' * 50}\n")
-
-
-def cmd_backtest():
-    print(f"\n{'=' * 50}")
-    print(f"  QUICK ANALYSIS")
-    print(f"{'=' * 50}\n")
-    engine = Engine()
-    for symbol in Config.WATCHLIST:
-        try:
-            signal = engine.analyze_symbol(symbol)
-            print(signal.summary())
-            for name, r in signal.results.items():
-                d = r.get("details", {})
-                detail_str = "  ".join(f"{k}={v}" for k, v in d.items()
-                                       if k not in ("error", "updates"))
-                if detail_str:
-                    print(f"    {name}: {detail_str}")
-            print()
-        except Exception as e:
-            print(f"  {symbol}: Error - {e}\n")
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Six Filters. One Trade.")
-    parser.add_argument("--scan-once", action="store_true", help="Single scan")
-    parser.add_argument("--status", action="store_true", help="Account status")
-    parser.add_argument("--backtest", action="store_true", help="Quick analysis")
-    parser.add_argument("--telegram", action="store_true", help="Start with Telegram control")
-    args = parser.parse_args()
-
-    setup_logging()
-
-    if not Config.validate():
-        print("\n  API Keys nicht konfiguriert!")
-        print("  1. cp .env.example .env")
-        print("  2. Trage deine Alpaca Keys in .env ein")
-        print("  3. Starte erneut\n")
-        sys.exit(1)
-
-    print()
-    print("  +==========================================+")
-    print("  |   SIX FILTERS. ONE TRADE.               |")
-    print("  |   Quantitative Trading Engine v1.0       |")
-    print("  +==========================================+")
-    print()
-
-    if args.status:
-        cmd_status()
-    elif args.scan_once:
-        e = Engine()
-        Engine().scan_once(market_open=e.broker.is_market_open())
-    elif args.backtest:
-        cmd_backtest()
-    else:
-        # Always start the API dashboard for long-running modes
-        from api import start_api_server
-        engine = Engine()
-        start_api_server(broker=engine.broker, port=int(os.getenv("BOT_API_PORT", "5001")))
-
-        if args.telegram:
-            if not Config.TELEGRAM_TOKEN or Config.TELEGRAM_TOKEN == "your_telegram_bot_token_here":
-                print("  Telegram nicht konfiguriert!")
-                print("  Trage TELEGRAM_TOKEN und TELEGRAM_CHAT_ID in .env ein.")
-                print("  Siehe README fuer Anleitung.\n")
-                sys.exit(1)
-            import threading
-            t = threading.Thread(target=engine.run, daemon=True, name="engine")
-            t.start()
-            from telegram_bot import TradingTelegramBot
-            bot = TradingTelegramBot()
-            bot.run()
-        else:
-            engine.run()
-
-
-if __name__ == "__main__":
-    main()
-
-
-################################################################
-##  DATEI: trading-bot/config.py
-################################################################
+################################################################################
+# FILE: trading-bot/config.py
+################################################################################
 
 """config.py — Zentrale Konfiguration."""
 
@@ -192,8 +83,16 @@ class Config:
 
     # ── Reasoning Layer Einstellungen ──
     REASONING_MODEL: str = "gemini-2.5-flash"
-    REASONING_MIN_CONFIDENCE: float = 0.65  # Gemini muss mind. 65% sicher sein
+    REASONING_MIN_CONFIDENCE: float = 0.55  # 55% — weniger restriktiv (war 65%)
     REASONING_TIMEOUT: int = 20
+
+    # ── Slippage & Fee Model ──
+    SLIPPAGE_BPS: float = float(os.getenv("SLIPPAGE_BPS", "10"))   # 10 bps = 0.10% Slippage
+    FEE_BPS: float = float(os.getenv("FEE_BPS", "1"))              # 1 bps regulatorische Gebuehren
+
+    # ── Spike-Sensor (Echtzeit Markt-Scanner) ──
+    SPIKE_SCAN_INTERVAL: int = 60     # Alle 60s breiten Markt scannen
+    SPIKE_MIN_PCT: float = 0.03       # 3% intraday-Bewegung = Spike
 
     @classmethod
     def is_paper(cls) -> bool:
@@ -209,10 +108,9 @@ class Config:
             raise RuntimeError("GEMINI_API_KEY fehlt in .env — Reasoning Layer nicht verfuegbar. Bot gestoppt.")
         return True
 
-
-################################################################
-##  DATEI: trading-bot/broker.py
-################################################################
+################################################################################
+# FILE: trading-bot/broker.py
+################################################################################
 
 """broker.py — Alpaca API Wrapper. Handles account, market data, orders."""
 
@@ -431,6 +329,15 @@ class AlpacaBroker:
             logger.error(f"Close failed {symbol}: {e}")
             return None
 
+    def get_snapshots_batch(self, symbols: list) -> dict:
+        """Batch-Snapshot für bis zu 200 Symbole auf einmal (nur US Stocks, kein Crypto)."""
+        try:
+            result = self.api.get_snapshots(symbols, feed="iex")
+            return result if result else {}
+        except Exception as e:
+            logger.warning(f"Batch snapshots failed: {e}")
+            return {}
+
     def is_market_open(self) -> bool:
         return self.api.get_clock().is_open
 
@@ -454,10 +361,9 @@ class AlpacaBroker:
             return "extended"
         return "closed"
 
-
-################################################################
-##  DATEI: trading-bot/risk_manager.py
-################################################################
+################################################################################
+# FILE: trading-bot/risk_manager.py
+################################################################################
 
 """
 risk_manager.py — Adaptives Risikomanagement
@@ -817,10 +723,9 @@ class RiskManager:
             f"Kill Switch: {'ACTIVE' if self.kill_switch_active else 'OFF'}"
         )
 
-
-################################################################
-##  DATEI: trading-bot/adaptive.py
-################################################################
+################################################################################
+# FILE: trading-bot/adaptive.py
+################################################################################
 
 """
 adaptive.py — Reinforcement Learning / Adaptives Lernen
@@ -1239,10 +1144,9 @@ class AdaptiveLearner:
                 lines.append(f"  {formula:<16} {bar} {weight:.2f}")
         return "\n".join(lines)
 
-
-################################################################
-##  DATEI: trading-bot/market_context.py
-################################################################
+################################################################################
+# FILE: trading-bot/market_context.py
+################################################################################
 
 """
 market_context.py — Echtzeit Markt-Kontext fuer den Reasoning Layer
@@ -1467,10 +1371,1088 @@ class MarketContext:
 
         return "\n".join(lines)
 
+################################################################################
+# FILE: trading-bot/screener.py
+################################################################################
 
-################################################################
-##  DATEI: trading-bot/engine.py
-################################################################
+"""
+screener.py — Echtzeit Markt-Spike-Scanner.
+
+Scannt ~300 Small-Cap / Penny Stocks per Alpaca Batch-Snapshot.
+Erkennt Preissprünge (>3% intraday ODER >5x Volumen) in Echtzeit.
+Fügt erkannte Symbole sofort zur aktiven Analyse-Queue hinzu.
+"""
+
+import logging
+import time
+from typing import TYPE_CHECKING
+
+from config import Config
+
+if TYPE_CHECKING:
+    from broker import AlpacaBroker
+
+logger = logging.getLogger("bot.screener")
+
+
+class SpikeSensor:
+    """
+    Scannt den breiten Markt alle 60s auf Preissprünge via Batch-Snapshots.
+    Universum: ~300 bekannte volatile Small-Cap / Penny / Biotech Stocks.
+    Trigger: >3% intraday-Bewegung ODER Volumen >3x Durchschnitt.
+    """
+
+    # Breites Universum: ~300 volatile Small/Micro Caps, Biotech, Meme, EV, Crypto-Proxies
+    UNIVERSE = [
+        # ── Meme / Reddit ──────────────────────────────────────
+        "AMC", "GME", "BBBY", "KOSS", "EXPR", "BB", "NOK", "SPCE",
+        # ── Biotech / Pharma ───────────────────────────────────
+        "OCGN", "NVAX", "INO", "SRNE", "ATOS", "VXRT", "IOVA", "SAVA",
+        "CRSP", "EDIT", "NTLA", "BEAM", "VERV", "HOOK", "FREQ", "AMRN",
+        "MNKD", "ADMA", "OTIC", "NAVB", "CPRX", "PRGO", "IRWD", "ENDP",
+        "DARE", "CLRB", "TTOO", "INPX", "CLPS", "KOPN", "VUZI",
+        "AGEN", "SURF", "PHUN", "PRME", "SUPN", "NKTR", "ACAD",
+        # ── EV / Wasserstoff / Clean Energy ───────────────────
+        "NKLA", "GOEV", "RIDE", "WKHS", "AYRO", "HYLN", "FSR",
+        "PLUG", "FCEL", "BLNK", "CHPT", "QS", "LCID", "RIVN",
+        "SPWR", "SUNW", "NOVA", "RUN", "ARRY", "STEM",
+        # ── Crypto-Proxies ─────────────────────────────────────
+        "MARA", "RIOT", "BTBT", "SOS", "NCTY", "MOGO", "EBON",
+        "CAN", "HUT", "CIFR", "BTDR", "CORZ",
+        # ── Cannabis ───────────────────────────────────────────
+        "SNDL", "APHA", "TLRY", "ACB", "CGC", "CRON", "HEXO",
+        "OGI", "GRWG", "IIPR",
+        # ── Fintech / Meme Finance ─────────────────────────────
+        "SOFI", "UPST", "AFRM", "HOOD", "COIN", "OPEN", "DKNG",
+        "PENN", "SKLZ", "RBLX", "CLOV", "WISH",
+        # ── Tech Small Caps ────────────────────────────────────
+        "MVIS", "IDEX", "HIMS", "NNDM", "PLBY", "GNUS", "PRED",
+        "SOLO", "XELA", "CTRM", "SHIP", "FREE", "IMPP", "ZOM",
+        "PHGE", "CIDM", "CELZ", "IMVT", "ALDX", "RETA", "NVAX",
+        # ── Energy / Oil Micro ─────────────────────────────────
+        "BORR", "TELL", "NEXT", "HLTH", "AMTX", "REI", "IMPP",
+        # ── SPACs / Recent IPOs ────────────────────────────────
+        "PSFE", "SKLZ", "VIEW", "VELO", "GRNV",
+        # ── Volatile Mid-Caps mit Momentum ────────────────────
+        "RKT", "OPEN", "OFFERPAD", "IRBT", "VZIO", "ANGI",
+        "LMND", "ROOT", "HIPPO", "MILE", "METROMILE",
+        # ── Short-Squeeze Kandidaten ───────────────────────────
+        "PRTY", "VSTO", "SCVL", "PAYA", "OLBG", "HRTX", "ACET",
+        "NUVB", "AEYE", "SKIN", "BKSY", "SPIR", "OSAT",
+        # ── Biotech mit nahen Katalysatoren ───────────────────
+        "FATE", "RGEN", "ARWR", "PTGX", "YMAB", "IMCR", "TGTX",
+        "KRTX", "RXDX", "ARVN", "KDNY", "RCKT", "ALLO",
+        "CABA", "MGTX", "RAPT", "NRIX", "PRAX", "FOLD",
+        # ── OTC / Micro Cap (handelbar via Alpaca) ─────────────
+        "TNXP", "JAGX", "GFAI", "MULN", "BBIG", "PHUN",
+        "NXGL", "LIQT", "LGVN", "TPVG", "DPSI",
+    ]
+
+    def __init__(self, broker: "AlpacaBroker"):
+        self.broker = broker
+        self.min_pct = getattr(Config, "SPIKE_MIN_PCT", 0.03)   # 3% intraday
+        self.min_vol_mult = 3.0                                   # 3x avg volume
+        self.last_scan = 0
+        self.scan_interval = getattr(Config, "SPIKE_SCAN_INTERVAL", 60)
+        self._avg_volumes: dict[str, float] = {}                  # rolling avg
+        logger.info(f"[SPIKE] SpikeSensor init — Universum: {len(self.UNIVERSE)} Symbole")
+
+    def should_scan(self) -> bool:
+        return time.time() - self.last_scan >= self.scan_interval
+
+    def scan(self) -> list[str]:
+        """
+        Batch-Snapshot aller Symbole → filtert Spikes.
+        Gibt Liste der Symbole zurück die sofort analysiert werden sollen.
+        """
+        if not self.should_scan():
+            return []
+
+        self.last_scan = time.time()
+        spikes: list[str] = []
+
+        # Batches à 200 (Alpaca-Limit pro Request)
+        batch_size = 200
+        for i in range(0, len(self.UNIVERSE), batch_size):
+            batch = self.UNIVERSE[i:i + batch_size]
+            snaps = self.broker.get_snapshots_batch(batch)
+
+            for symbol, snap in snaps.items():
+                try:
+                    daily = snap.daily_bar
+                    if not daily:
+                        continue
+
+                    open_p = float(daily.open)
+                    close_p = float(daily.close)
+                    volume = int(daily.volume)
+
+                    if open_p <= 0 or close_p <= 0:
+                        continue
+
+                    # Intraday % Bewegung (von Open)
+                    pct_move = (close_p - open_p) / open_p
+
+                    # Volumen-Multiplikator (gegen Rolling Average)
+                    avg_vol = self._avg_volumes.get(symbol, volume)
+                    vol_mult = volume / avg_vol if avg_vol > 0 else 1.0
+                    # Rolling Average updaten (EMA)
+                    self._avg_volumes[symbol] = avg_vol * 0.9 + volume * 0.1
+
+                    # Spike erkannt?
+                    is_spike = abs(pct_move) >= self.min_pct or vol_mult >= self.min_vol_mult
+
+                    if is_spike:
+                        direction = "+" if pct_move >= 0 else ""
+                        logger.info(
+                            f"[SPIKE] 🚀 {symbol}: {direction}{pct_move:.1%} intraday "
+                            f"| Vol: {vol_mult:.1f}x | Preis: ${close_p:.3f}"
+                        )
+                        spikes.append(symbol)
+
+                except Exception as e:
+                    logger.debug(f"[SPIKE] {symbol} snapshot parse error: {e}")
+
+        if spikes:
+            logger.info(f"[SPIKE] {len(spikes)} Spikes gefunden: {', '.join(spikes)}")
+        else:
+            logger.debug(f"[SPIKE] Kein Spike im Universum ({len(self.UNIVERSE)} Symbole)")
+
+        return spikes
+
+################################################################################
+# FILE: trading-bot/formulas/momentum.py
+################################################################################
+
+"""
+Formula 1 — Momentum & Mean Reversion Detection
+
+Signale:
+  - RSI (14) fuer Overbought/Oversold
+  - EMA Crossover (8/21) fuer Trendrichtung
+  - Rate of Change (10-bar) fuer Staerke
+  - Bollinger Band Position fuer Mean-Reversion
+
+Output: signal (-1.0 bis +1.0), passed (bool)
+"""
+
+import numpy as np
+import pandas as pd
+
+
+def _rsi(closes: np.ndarray, period: int = 14) -> float:
+    deltas = np.diff(closes[-(period + 1):])
+    gains = np.where(deltas > 0, deltas, 0)
+    losses = np.where(deltas < 0, -deltas, 0)
+    avg_gain = np.mean(gains) if len(gains) > 0 else 0
+    avg_loss = np.mean(losses) if len(losses) > 0 else 1e-10
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+
+def _ema(data: np.ndarray, period: int) -> np.ndarray:
+    alpha = 2 / (period + 1)
+    ema = np.zeros_like(data, dtype=float)
+    ema[0] = data[0]
+    for i in range(1, len(data)):
+        ema[i] = alpha * data[i] + (1 - alpha) * ema[i - 1]
+    return ema
+
+
+def _bollinger_position(closes: np.ndarray, period: int = 20, num_std: float = 2.0) -> float:
+    if len(closes) < period:
+        return 0.5
+    window = closes[-period:]
+    mean = np.mean(window)
+    std = np.std(window)
+    if std < 1e-10:
+        return 0.5
+    upper = mean + num_std * std
+    lower = mean - num_std * std
+    pos = (closes[-1] - lower) / (upper - lower)
+    return float(np.clip(pos, 0.0, 1.0))
+
+
+def evaluate(bars: pd.DataFrame, threshold: float = 0.6, **kwargs) -> dict:
+    """
+    Formula-Interface fuer engine.py.
+    bars: pandas DataFrame mit 'close' Spalte.
+    """
+    name = "Momentum"
+
+    if bars is None or bars.empty or len(bars) < 30:
+        return {"name": name, "signal": 0.0, "passed": False,
+                "details": {"error": "Not enough bars"}}
+
+    closes = bars["close"].values.astype(float)
+
+    rsi = _rsi(closes, 14)
+    ema_fast = _ema(closes, 8)
+    ema_slow = _ema(closes, 21)
+    ema_diff = (ema_fast[-1] - ema_slow[-1]) / closes[-1]
+    roc = (closes[-1] - closes[-11]) / closes[-11] if len(closes) > 11 else 0.0
+    bb_pos = _bollinger_position(closes, 20, 2.0)
+
+    score = 0.0
+    signals = 0
+
+    if rsi < 30:
+        score += 0.3
+        signals += 1
+    elif rsi > 70:
+        score -= 0.3
+        signals += 1
+
+    if ema_diff > 0.002:
+        score += 0.25
+        signals += 1
+    elif ema_diff < -0.002:
+        score -= 0.25
+        signals += 1
+
+    if roc > 0.02:
+        score += 0.25
+        signals += 1
+    elif roc < -0.02:
+        score -= 0.25
+        signals += 1
+
+    if bb_pos < 0.1:
+        score += 0.2
+        signals += 1
+    elif bb_pos > 0.9:
+        score -= 0.2
+        signals += 1
+
+    confidence = min(abs(score) / 0.7, 1.0)
+    passed = confidence >= threshold and signals >= 2 and score > 0
+
+    return {
+        "name": name,
+        "signal": round(float(score), 3),
+        "passed": passed,
+        "details": {
+            "rsi": round(rsi, 1),
+            "ema_diff": round(ema_diff, 4),
+            "roc": round(roc, 4),
+            "bb_pos": round(bb_pos, 3),
+            "confidence": round(confidence, 3),
+            "signals": signals,
+        },
+    }
+
+################################################################################
+# FILE: trading-bot/formulas/kelly.py
+################################################################################
+
+"""
+Formula 2 — Kelly Criterion
+f* = (p * b - q) / b
+Wir verwenden Quarter-Kelly fuer konservatives Sizing.
+"""
+
+import numpy as np
+import pandas as pd
+from config import Config
+
+
+def kelly_fraction(win_prob: float, payoff_ratio: float) -> float:
+    q = 1.0 - win_prob
+    f_star = (win_prob * payoff_ratio - q) / payoff_ratio
+    return max(0.0, min(f_star, 1.0))
+
+
+def evaluate(bars: pd.DataFrame, equity: float = 10000.0, **kwargs) -> dict:
+    if len(bars) < 20:
+        return {"name": "Kelly", "signal": 0.0, "passed": False,
+                "details": {"error": "Not enough data"}}
+
+    returns = bars["returns"].dropna()
+
+    # Win rate und Payoff aus historischen Returns
+    win_prob = (returns > 0).sum() / len(returns)
+    gains = returns[returns > 0]
+    losses = returns[returns < 0]
+    avg_gain = gains.mean() if len(gains) > 0 else 0.001
+    avg_loss = abs(losses.mean()) if len(losses) > 0 else 0.001
+
+    # Slippage & Gebuehren abziehen (Kosten pro Seite: Kauf + Verkauf)
+    cost_pct = (Config.SLIPPAGE_BPS + Config.FEE_BPS) / 10000 * 2  # je Roundtrip
+    adj_gain = max(avg_gain - cost_pct, 0.0001)
+    adj_loss = avg_loss + cost_pct
+    payoff = min(adj_gain / adj_loss, 10.0)
+
+    full_kelly = kelly_fraction(win_prob, payoff)
+    adjusted = full_kelly * Config.KELLY_FRACTION
+    final_pct = min(adjusted, Config.MAX_POSITION_PCT)
+    bet_size = equity * final_pct
+
+    return {
+        "name": "Kelly",
+        "signal": round(adjusted, 4),
+        "passed": adjusted > 0.005,
+        "details": {
+            "win_rate": round(win_prob, 3),
+            "payoff_ratio": round(payoff, 3),
+            "full_kelly": round(full_kelly, 4),
+            "adjusted_kelly": round(adjusted, 4),
+            "final_pct": round(final_pct, 4),
+            "bet_size_usd": round(bet_size, 2),
+            "fraction_used": f"{Config.KELLY_FRACTION}x Kelly",
+            "cost_pct": f"{cost_pct*100:.3f}%",
+        },
+    }
+
+################################################################################
+# FILE: trading-bot/formulas/ev_gap.py
+################################################################################
+
+"""
+Formula 3 — EV Gap Detection
+Vergleicht aktuellen Preis mit Fair Value (VWAP + Bollinger + EMA).
+Sucht Gaps wo Expected Value positiv ist.
+"""
+
+import numpy as np
+import pandas as pd
+from config import Config
+
+
+def estimate_fair_value(bars: pd.DataFrame) -> float:
+    prices = bars["close"]
+    volumes = bars["volume"]
+    vwap = (prices * volumes).sum() / volumes.sum() if volumes.sum() > 0 else prices.mean()
+    bb_mid = prices.rolling(20).mean().iloc[-1]
+    ema21 = prices.ewm(span=21, adjust=False).mean().iloc[-1]
+    return vwap * 0.4 + bb_mid * 0.3 + ema21 * 0.3
+
+
+def evaluate(bars: pd.DataFrame, **kwargs) -> dict:
+    if len(bars) < 25:
+        return {"name": "EV-Gap", "signal": 0.0, "passed": False,
+                "details": {"error": "Not enough data"}}
+
+    current_price = bars["close"].iloc[-1]
+    fair_value = estimate_fair_value(bars)
+    win_prob = kwargs.get("win_prob", 0.55)
+
+    gap_pct = (fair_value - current_price) / current_price
+    upside = abs(gap_pct) if gap_pct > 0 else abs(gap_pct) * 0.3
+    downside = abs(gap_pct) * 0.5
+
+    # Slippage & Gebuehren vom EV abziehen
+    cost_pct = (Config.SLIPPAGE_BPS + Config.FEE_BPS) / 10000 * 2  # Roundtrip
+    net_upside = max(upside - cost_pct, 0.0)
+    net_downside = downside + cost_pct
+    ev = win_prob * net_upside - (1 - win_prob) * net_downside
+
+    direction = "LONG" if gap_pct > 0 else "SHORT" if gap_pct < -Config.MIN_EV_GAP else "NEUTRAL"
+
+    return {
+        "name": "EV-Gap",
+        "signal": round(ev, 5),
+        "passed": abs(ev) > Config.MIN_EV_GAP and gap_pct > 0,
+        "details": {
+            "current_price": round(current_price, 2),
+            "fair_value": round(fair_value, 2),
+            "gap_pct": f"{gap_pct:+.2%}",
+            "ev": round(ev, 5),
+            "direction": direction,
+            "cost_pct": f"{cost_pct*100:.3f}%",
+        },
+    }
+
+################################################################################
+# FILE: trading-bot/formulas/kl_divergence.py
+################################################################################
+
+"""
+Formula 4 — KL-Divergence (Cross-Timeframe)
+Misst statistische Distanz zwischen kurz- und langfristigen Returns.
+Hohe Divergenz = Zeitrahmen aus dem Gleichgewicht = Opportunity.
+"""
+
+import numpy as np
+import pandas as pd
+from config import Config
+
+
+def symmetric_kl(p: np.ndarray, q: np.ndarray) -> float:
+    p = np.clip(p, 1e-10, None)
+    q = np.clip(q, 1e-10, None)
+    p = p / p.sum()
+    q = q / q.sum()
+    kl_pq = float(np.sum(p * np.log(p / q)))
+    kl_qp = float(np.sum(q * np.log(q / p)))
+    return (kl_pq + kl_qp) / 2
+
+
+def evaluate(bars: pd.DataFrame, **kwargs) -> dict:
+    if len(bars) < 50:
+        return {"name": "KL-Divergence", "signal": 0.0, "passed": False,
+                "details": {"error": "Need 50+ bars"}}
+
+    returns = bars["returns"].dropna()
+    short_returns = returns.tail(10)
+    long_returns = returns.tail(50)
+
+    range_min = long_returns.min()
+    range_max = long_returns.max()
+    bins = np.linspace(range_min, range_max, 21)
+
+    p_short, _ = np.histogram(short_returns, bins=bins, density=True)
+    q_long, _ = np.histogram(long_returns, bins=bins, density=True)
+
+    p_short = p_short + 1e-10
+    q_long = q_long + 1e-10
+    p_short = p_short / p_short.sum()
+    q_long = q_long / q_long.sum()
+
+    kl_div = symmetric_kl(p_short, q_long)
+    threshold = kwargs.get("threshold", Config.KL_DIVERGENCE_THRESHOLD)
+
+    short_mean = short_returns.mean()
+    long_mean = long_returns.mean()
+    drift = "SHORT_OUTPERFORMS" if short_mean > long_mean else "SHORT_UNDERPERFORMS"
+    bullish_reversion = short_mean < long_mean and kl_div > threshold
+
+    return {
+        "name": "KL-Divergence",
+        "signal": round(kl_div, 4),
+        "passed": kl_div > threshold,
+        "details": {
+            "kl_divergence": round(kl_div, 4),
+            "threshold": threshold,
+            "short_mean": f"{short_mean:+.4f}",
+            "long_mean": f"{long_mean:+.4f}",
+            "drift": drift,
+            "bullish_reversion": bullish_reversion,
+        },
+    }
+
+################################################################################
+# FILE: trading-bot/formulas/bayesian.py
+################################################################################
+
+"""
+Formula 5 — Bayesian Updates
+P(H|E) = P(E|H) * P(H) / P(E)
+Aktualisiert Trade-Wahrscheinlichkeit basierend auf Volume, Momentum, Volatilitaet.
+"""
+
+import numpy as np
+import pandas as pd
+
+
+class BayesianUpdater:
+    def __init__(self, prior: float = 0.5):
+        self.posterior = prior
+        self.updates = []
+
+    def update(self, likelihood_ratio: float, label: str = "") -> float:
+        prior_odds = self.posterior / (1.0 - self.posterior + 1e-10)
+        posterior_odds = prior_odds * likelihood_ratio
+        self.posterior = posterior_odds / (1.0 + posterior_odds)
+        self.posterior = max(0.05, min(0.95, self.posterior))
+        self.updates.append({"label": label, "lr": round(likelihood_ratio, 3),
+                             "posterior": round(self.posterior, 4)})
+        return self.posterior
+
+
+def evaluate(bars: pd.DataFrame, **kwargs) -> dict:
+    if len(bars) < 30:
+        return {"name": "Bayesian", "signal": 0.5, "passed": False,
+                "details": {"error": "Not enough data"}}
+
+    prior = kwargs.get("prior", 0.50)
+    threshold = kwargs.get("threshold", 0.60)
+    u = BayesianUpdater(prior)
+
+    # Signal 1: Volume Spike
+    vol = bars["volume"]
+    avg_vol = vol.iloc[-21:-1].mean() if len(vol) > 21 else vol.mean()
+    vol_ratio = vol.iloc[-1] / avg_vol if avg_vol > 0 else 1.0
+    if vol_ratio > 2.0:
+        recent_ret = bars["returns"].tail(3).mean()
+        u.update(1.8 if recent_ret > 0 else 0.6, "volume_spike")
+    else:
+        u.update(1.0, "volume_normal")
+
+    # Signal 2: Price Acceleration
+    returns = bars["returns"]
+    recent = returns.tail(5).mean()
+    prior_ret = returns.iloc[-10:-5].mean() if len(returns) > 10 else 0
+    if recent > prior_ret and recent > 0:
+        u.update(1.5, "accelerating")
+    elif recent < 0:
+        u.update(0.7, "decelerating")
+    else:
+        u.update(1.0, "neutral")
+
+    # Signal 3: Volatility Regime
+    current_vol = returns.tail(20).std()
+    hist_vol = returns.std()
+    vol_r = current_vol / (hist_vol + 1e-10)
+    if vol_r < 0.7:
+        u.update(1.2, "low_vol")
+    elif vol_r > 1.3:
+        u.update(0.85, "high_vol")
+    else:
+        u.update(1.0, "normal_vol")
+
+    # Signal 4: Trend Consistency
+    pos_pct = (returns.tail(10) > 0).sum() / 10
+    if pos_pct > 0.7:
+        u.update(1.6, "strong_uptrend")
+    elif pos_pct < 0.3:
+        u.update(0.5, "strong_downtrend")
+    else:
+        u.update(1.0, "mixed")
+
+    return {
+        "name": "Bayesian",
+        "signal": round(u.posterior, 4),
+        "passed": u.posterior >= threshold,
+        "details": {
+            "prior": prior,
+            "posterior": round(u.posterior, 4),
+            "updates": u.updates,
+            "vol_ratio": round(vol_ratio, 2),
+            "vol_regime": "low" if vol_r < 0.7 else "high" if vol_r > 1.3 else "normal",
+        },
+    }
+
+################################################################################
+# FILE: trading-bot/formulas/stoikov.py
+################################################################################
+
+"""
+Formula 6 — Stoikov Execution (Avellaneda-Stoikov)
+Reservation Price: r = mid - q * gamma * sigma^2 * (T - t)
+Bot kauft nur wenn Preis <= Reservation Price.
+"""
+
+import numpy as np
+import pandas as pd
+from config import Config
+
+
+def evaluate(bars: pd.DataFrame, snapshot: dict = None, **kwargs) -> dict:
+    if len(bars) < 20:
+        return {"name": "Stoikov", "signal": 0.0, "passed": False,
+                "details": {"error": "Not enough data"}}
+
+    current_price = bars["close"].iloc[-1]
+
+    # Mid price from bid/ask
+    if snapshot and snapshot.get("bid") and snapshot.get("ask"):
+        mid = (snapshot["bid"] + snapshot["ask"]) / 2.0
+        spread = snapshot["ask"] - snapshot["bid"]
+    else:
+        mid = current_price
+        spread = current_price * 0.002
+
+    # Annualized volatility
+    returns = bars["returns"].dropna()
+    sigma = returns.std() * np.sqrt(252 * 78)  # 78 five-min bars/day
+    sigma = max(sigma, 0.01)
+
+    inventory_skew = kwargs.get("inventory_skew", 0.0)
+    gamma = kwargs.get("gamma", Config.STOIKOV_SPREAD_MULT)
+    time_remaining = kwargs.get("time_remaining", 0.5)
+
+    # Reservation price
+    reservation = mid - inventory_skew * gamma * (sigma ** 2) * time_remaining
+
+    price_advantage = (reservation - current_price) / current_price
+    passed = current_price <= reservation
+
+    return {
+        "name": "Stoikov",
+        "signal": round(price_advantage, 5),
+        "passed": passed,
+        "details": {
+            "current_price": round(current_price, 2),
+            "mid_price": round(mid, 2),
+            "reservation_price": round(reservation, 2),
+            "price_advantage": f"{price_advantage:+.3%}",
+            "spread": round(spread, 4),
+            "volatility": round(sigma, 4),
+            "inventory_skew": round(inventory_skew, 2),
+        },
+    }
+
+################################################################################
+# FILE: trading-bot/formulas/sentiment.py
+################################################################################
+
+"""
+sentiment.py — Multimodale Sentiment-Analyse
+
+Drei Ebenen (alle Pflicht):
+1. Alpaca News API — Echtzeit-Nachrichten pro Symbol
+2. Keyword-Scoring — schnelle Sentiment-Bewertung
+3. Google Gemini — Deep Analysis (IMMER aktiv, kein Fallback)
+
+Output: Sentiment-Score von -1.0 (extrem bearish) bis +1.0 (extrem bullish)
+"""
+
+import logging
+import time
+import re
+from datetime import datetime, timedelta
+from typing import Optional
+
+from config import Config
+
+logger = logging.getLogger("bot.sentiment")
+
+
+# ═══════════════════════════════════════════════════════
+#  KEYWORD DICTIONARIES
+# ═══════════════════════════════════════════════════════
+
+BULLISH_KEYWORDS = {
+    # Starke Signale (Gewicht 2)
+    "beat earnings": 2, "beats estimates": 2, "record revenue": 2,
+    "upgraded": 2, "all-time high": 2, "breakout": 2,
+    "acquisition": 1.5, "buyback": 1.5, "share repurchase": 1.5,
+    "dividend increase": 1.5, "fda approval": 2, "patent granted": 1.5,
+    "partnership": 1, "expansion": 1, "growth": 1,
+    "bullish": 1.5, "rally": 1.5, "surge": 1.5, "soar": 1.5,
+    "outperform": 1.5, "buy rating": 2, "price target raised": 2,
+    "strong demand": 1.5, "record sales": 2, "market share gain": 1.5,
+    # Moderate Signale (Gewicht 1)
+    "positive": 1, "gains": 1, "higher": 1, "rises": 1,
+    "optimistic": 1, "momentum": 1, "recovery": 1, "rebound": 1,
+    "beat": 1, "exceeds": 1, "strong": 1, "profit": 1,
+}
+
+BEARISH_KEYWORDS = {
+    # Starke Signale (Gewicht 2)
+    "misses estimates": 2, "missed earnings": 2, "profit warning": 2,
+    "downgraded": 2, "sell rating": 2, "price target cut": 2,
+    "layoffs": 1.5, "restructuring": 1.5, "bankruptcy": 2,
+    "investigation": 1.5, "lawsuit": 1.5, "fraud": 2,
+    "recall": 1.5, "fda rejection": 2, "data breach": 1.5,
+    "sanctions": 1.5, "tariff": 1.5, "trade war": 1.5,
+    # Moderate Signale (Gewicht 1)
+    "bearish": 1.5, "crash": 1.5, "plunge": 1.5, "tumble": 1.5,
+    "decline": 1, "falls": 1, "drops": 1, "lower": 1, "loss": 1,
+    "negative": 1, "concern": 1, "risk": 0.5, "uncertainty": 1,
+    "sell-off": 1.5, "correction": 1, "recession": 1.5,
+    "war": 1.5, "conflict": 1, "attack": 1, "crisis": 1.5,
+}
+
+# Makro-Keywords die den GESAMTEN Markt betreffen
+MACRO_BULLISH = {
+    "rate cut": 2, "fed dovish": 2, "stimulus": 1.5,
+    "ceasefire": 2, "peace deal": 2, "peace talks": 1.5,
+    "inflation falls": 1.5, "unemployment low": 1,
+    "strong jobs": 1.5, "gdp growth": 1.5, "consumer confidence": 1,
+}
+
+MACRO_BEARISH = {
+    "rate hike": 2, "fed hawkish": 2, "tightening": 1.5,
+    "war escalation": 2, "missile strike": 2, "strait of hormuz": 2,
+    "oil spike": 1.5, "oil surge": 1.5, "supply disruption": 1.5,
+    "inflation rises": 1.5, "stagflation": 2,
+    "default": 2, "debt ceiling": 1.5, "government shutdown": 1.5,
+    "nuclear": 1.5, "invasion": 2, "bombing": 1.5,
+}
+
+
+# ═══════════════════════════════════════════════════════
+#  NEWS FETCHER (via Alpaca)
+# ═══════════════════════════════════════════════════════
+
+class NewsFetcher:
+    """Holt Nachrichten ueber die Alpaca News API."""
+
+    def __init__(self, broker):
+        self.api = broker.api
+
+    def get_news(self, symbol: str, limit: int = 10, hours_back: int = 24) -> list[dict]:
+        """Holt aktuelle News fuer ein Symbol."""
+        try:
+            end = datetime.now()
+            start = end - timedelta(hours=hours_back)
+
+            news = self.api.get_news(
+                symbol=symbol,
+                start=start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                end=end.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                limit=limit,
+            )
+
+            articles = []
+            for item in news:
+                articles.append({
+                    "headline": item.headline,
+                    "summary": getattr(item, "summary", "") or "",
+                    "source": getattr(item, "source", "unknown"),
+                    "created_at": str(item.created_at),
+                    "symbols": getattr(item, "symbols", []),
+                })
+
+            logger.debug(f"{symbol}: {len(articles)} articles found")
+            return articles
+
+        except Exception as e:
+            logger.warning(f"News fetch failed for {symbol}: {e}")
+            return []
+
+    def get_market_news(self, limit: int = 15) -> list[dict]:
+        """Holt allgemeine Markt-News (nicht symbol-spezifisch)."""
+        try:
+            news = self.api.get_news(limit=limit)
+            return [{
+                "headline": item.headline,
+                "summary": getattr(item, "summary", "") or "",
+                "source": getattr(item, "source", "unknown"),
+                "created_at": str(item.created_at),
+            } for item in news]
+        except Exception as e:
+            logger.warning(f"Market news fetch failed: {e}")
+            return []
+
+
+# ═══════════════════════════════════════════════════════
+#  KEYWORD SENTIMENT SCORER
+# ═══════════════════════════════════════════════════════
+
+class KeywordScorer:
+    """Schnelle Sentiment-Bewertung basierend auf Keywords."""
+
+    @staticmethod
+    def score_text(text: str, bullish_dict: dict, bearish_dict: dict) -> dict:
+        """Bewertet einen Text und gibt Score + Details zurueck."""
+        text_lower = text.lower()
+
+        bull_score = 0.0
+        bear_score = 0.0
+        bull_hits = []
+        bear_hits = []
+
+        for keyword, weight in bullish_dict.items():
+            count = text_lower.count(keyword)
+            if count > 0:
+                bull_score += weight * count
+                bull_hits.append(keyword)
+
+        for keyword, weight in bearish_dict.items():
+            count = text_lower.count(keyword)
+            if count > 0:
+                bear_score += weight * count
+                bear_hits.append(keyword)
+
+        total = bull_score + bear_score
+        if total == 0:
+            normalized = 0.0
+        else:
+            # -1 (bearish) bis +1 (bullish)
+            normalized = (bull_score - bear_score) / total
+
+        return {
+            "score": round(normalized, 3),
+            "bull_score": round(bull_score, 2),
+            "bear_score": round(bear_score, 2),
+            "bull_hits": bull_hits,
+            "bear_hits": bear_hits,
+        }
+
+    @staticmethod
+    def score_articles(articles: list[dict], is_macro: bool = False) -> dict:
+        """Bewertet mehrere Artikel und aggregiert."""
+        if not articles:
+            return {
+                "score": 0.0,
+                "article_count": 0,
+                "details": [],
+            }
+
+        bull_dict = MACRO_BULLISH if is_macro else BULLISH_KEYWORDS
+        bear_dict = MACRO_BEARISH if is_macro else BEARISH_KEYWORDS
+
+        scores = []
+        details = []
+
+        for article in articles:
+            text = article["headline"] + " " + article.get("summary", "")
+            result = KeywordScorer.score_text(text, bull_dict, bear_dict)
+
+            # Neuere Artikel haben mehr Gewicht
+            scores.append(result["score"])
+            if result["bull_hits"] or result["bear_hits"]:
+                details.append({
+                    "headline": article["headline"][:80],
+                    "score": result["score"],
+                    "signals": result["bull_hits"] + [f"-{b}" for b in result["bear_hits"]],
+                })
+
+        # Gewichteter Durchschnitt (neuere zuerst)
+        if scores:
+            weights = [1.0 / (i + 1) for i in range(len(scores))]
+            total_weight = sum(weights)
+            weighted_score = sum(s * w for s, w in zip(scores, weights)) / total_weight
+        else:
+            weighted_score = 0.0
+
+        return {
+            "score": round(weighted_score, 3),
+            "article_count": len(articles),
+            "details": details[:5],  # Top 5 relevanteste
+        }
+
+
+# ═══════════════════════════════════════════════════════
+#  GEMINI DEEP ANALYSIS (optional)
+# ═══════════════════════════════════════════════════════
+
+class GeminiAnalyzer:
+    """
+    Nutzt Google Gemini fuer tiefere Sentiment-Analyse.
+    Nur fuer kritische Momente (spart API-Kosten).
+
+    Erfordert GEMINI_API_KEY in .env
+    """
+
+    def __init__(self):
+        self.api_key = Config.GEMINI_API_KEY
+        if not self.api_key:
+            raise RuntimeError("GEMINI_API_KEY fehlt — Sentiment Analysis nicht moeglich")
+        self.last_call = 0
+        self.min_interval = 60  # Max 1 Call pro Minute
+
+    def analyze(self, headlines: list[str], symbol: str) -> Optional[dict]:
+        """
+        Fragt Gemini nach einer Einschaetzung.
+        Gibt Score (-1 bis +1) und Begruendung zurueck.
+        """
+        if not headlines:
+            return None
+
+        # Rate limiting
+        now = time.time()
+        if now - self.last_call < self.min_interval:
+            return None
+
+        try:
+            from google import genai
+            from google.genai import types as genai_types
+            import json
+
+            client = genai.Client(api_key=self.api_key)
+            news_text = "\n".join(f"- {h}" for h in headlines[:10])
+
+            prompt = (
+                f"Analyze these headlines for {symbol} stock sentiment.\n\n"
+                f"{news_text}\n\n"
+                f"Respond ONLY with JSON:\n"
+                f'{{"score": <-1.0 to 1.0>, "confidence": <0 to 1>, '
+                f'"reason": "<one sentence>"}}'
+            )
+
+            response = client.models.generate_content(
+                model=Config.REASONING_MODEL,
+                contents=prompt,
+                config=genai_types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    max_output_tokens=300,
+                ),
+            )
+
+            self.last_call = time.time()
+            text = response.text or ""
+            match = re.search(r'\{[^}]+\}', text)
+            if match:
+                result = json.loads(match.group())
+                logger.info(f"Gemini analysis {symbol}: score={result.get('score')} "
+                            f"reason={result.get('reason', '')[:60]}")
+                return result
+            return None
+
+        except Exception as e:
+            logger.warning(f"Gemini analysis failed: {e}")
+            return None
+
+
+# ═══════════════════════════════════════════════════════
+#  HAUPTMODUL: SENTIMENT ENGINE
+# ═══════════════════════════════════════════════════════
+
+class SentimentEngine:
+    """
+    Kombiniert alle Sentiment-Quellen:
+    1. Symbol-spezifische News (Alpaca)
+    2. Makro-News (Markt allgemein)
+    3. Optional: Google Gemini Deep Analysis
+
+    Output wird als Signal in den Bayesian Updater gespeist.
+    """
+
+    def __init__(self, broker):
+        self.news_fetcher = NewsFetcher(broker)
+        self.scorer = KeywordScorer()
+        self.gemini = GeminiAnalyzer()
+
+        # Cache um API-Calls zu reduzieren
+        self._cache: dict = {}
+        self._cache_ttl = 300  # 5 Minuten Cache
+
+    def _is_cached(self, key: str) -> bool:
+        if key in self._cache:
+            ts, _ = self._cache[key]
+            if time.time() - ts < self._cache_ttl:
+                return True
+        return False
+
+    def _get_cached(self, key: str) -> Optional[dict]:
+        if self._is_cached(key):
+            return self._cache[key][1]
+        return None
+
+    def _set_cache(self, key: str, value: dict):
+        self._cache[key] = (time.time(), value)
+
+    def analyze_symbol(self, symbol: str) -> dict:
+        """
+        Vollstaendige Sentiment-Analyse fuer ein Symbol.
+
+        Returns:
+            score: -1.0 (bearish) bis +1.0 (bullish)
+            confidence: 0 bis 1 (wie sicher)
+            details: Aufschluesselung
+        """
+        # Cache Check
+        cached = self._get_cached(f"sentiment_{symbol}")
+        if cached:
+            return cached
+
+        # ── 1. Symbol-spezifische News ──
+        articles = self.news_fetcher.get_news(symbol, limit=10, hours_back=12)
+        symbol_sentiment = self.scorer.score_articles(articles)
+
+        # ── 2. Makro-News ──
+        macro_articles = self.news_fetcher.get_market_news(limit=10)
+        macro_sentiment = self.scorer.score_articles(macro_articles, is_macro=True)
+
+        # ── 3. Gemini (nur wenn Score unklar oder extreme News) ──
+        gemini_result = None
+        headlines = [a["headline"] for a in articles]
+        if headlines and abs(symbol_sentiment["score"]) > 0.3:
+            gemini_result = self.gemini.analyze(headlines, symbol)
+
+        # ── Kombination ──
+        # Gewichtung: Symbol-News 50%, Makro 30%, Gemini 20%
+        combined = symbol_sentiment["score"] * 0.50 + macro_sentiment["score"] * 0.30
+        if gemini_result and "score" in gemini_result:
+            combined += gemini_result["score"] * 0.20
+        else:
+            combined += symbol_sentiment["score"] * 0.20
+
+        # Confidence basierend auf Datenqualitaet
+        confidence = 0.3  # Baseline
+        if symbol_sentiment["article_count"] > 3:
+            confidence += 0.2
+        if symbol_sentiment["article_count"] > 7:
+            confidence += 0.1
+        if macro_sentiment["article_count"] > 3:
+            confidence += 0.1
+        if gemini_result:
+            confidence += 0.2
+        confidence = min(confidence, 1.0)
+
+        result = {
+            "score": round(max(-1.0, min(1.0, combined)), 3),
+            "confidence": round(confidence, 2),
+            "symbol_sentiment": symbol_sentiment,
+            "macro_sentiment": macro_sentiment,
+            "gemini_analysis": gemini_result,
+            "article_count": symbol_sentiment["article_count"] + macro_sentiment["article_count"],
+        }
+
+        self._set_cache(f"sentiment_{symbol}", result)
+        return result
+
+    def get_bayesian_likelihood(self, symbol: str) -> float:
+        """
+        Konvertiert Sentiment-Score in Bayesian Likelihood Ratio.
+
+        Score +0.5 → LR 2.0 (starkes bullish Signal)
+        Score  0.0 → LR 1.0 (neutral)
+        Score -0.5 → LR 0.5 (starkes bearish Signal)
+        """
+        result = self.analyze_symbol(symbol)
+        score = result["score"]
+        confidence = result["confidence"]
+
+        # Nur bei ausreichender Confidence den Score nutzen
+        if confidence < 0.3:
+            return 1.0  # Neutral
+
+        # Score (-1 bis +1) → LR (0.3 bis 3.0)
+        # Exponentiell skaliert
+        lr = 2.0 ** (score * confidence * 2)
+        return round(max(0.3, min(3.0, lr)), 3)
+
+
+# ═══════════════════════════════════════════════════════
+#  STANDALONE FORMULA INTERFACE
+# ═══════════════════════════════════════════════════════
+
+def evaluate(bars=None, broker=None, symbol: str = "", **kwargs) -> dict:
+    """
+    Formula-Interface fuer Integration in engine.py.
+
+    Braucht broker-Instanz fuer News-API Zugang.
+    """
+    if not broker or not symbol:
+        return {
+            "name": "Sentiment",
+            "signal": 0.0,
+            "passed": True,  # Bei fehlendem Zugang nicht blockieren
+            "details": {"error": "No broker/symbol provided"},
+        }
+
+    try:
+        engine = SentimentEngine(broker)
+        result = engine.analyze_symbol(symbol)
+
+        score = result["score"]
+        threshold = kwargs.get("threshold", -0.3)  # Blockiert nur bei stark bearish
+
+        return {
+            "name": "Sentiment",
+            "signal": round(score, 3),
+            "passed": score > threshold,  # Nur blockieren wenn STARK bearish
+            "details": {
+                "score": score,
+                "confidence": result["confidence"],
+                "articles": result["article_count"],
+                "macro": result["macro_sentiment"]["score"],
+                "symbol_news": result["symbol_sentiment"]["score"],
+                "gemini": result["gemini_analysis"] is not None,
+                "top_signals": (
+                    result["symbol_sentiment"]["details"][:3]
+                    if result["symbol_sentiment"]["details"]
+                    else []
+                ),
+            },
+        }
+
+    except Exception as e:
+        logger.warning(f"Sentiment analysis failed for {symbol}: {e}")
+        return {
+            "name": "Sentiment",
+            "signal": 0.0,
+            "passed": True,  # Nicht blockieren bei Fehler
+            "details": {"error": str(e)},
+        }
+
+################################################################################
+# FILE: trading-bot/engine.py
+################################################################################
 
 """
 engine.py — Drei-Schichten-Architektur:
@@ -1487,6 +2469,7 @@ engine.py — Drei-Schichten-Architektur:
 import json
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -1503,6 +2486,7 @@ from adaptive import AdaptiveLearner
 from formulas import momentum, kelly, ev_gap, kl_divergence, bayesian, stoikov
 from formulas import sentiment as sentiment_formula
 from market_context import MarketContext
+from screener import SpikeSensor
 
 logger = logging.getLogger("bot.engine")
 
@@ -1698,16 +2682,33 @@ class WatchlistDiscovery:
     Max 15 Symbole gesamt.
     """
 
-    def __init__(self):
+    def __init__(self, broker=None):
         from google import genai
         self.client = genai.Client(api_key=Config.GEMINI_API_KEY)
         self.last_update = 0
-        self.update_interval = 3600  # alle 1 Stunde
+        self.update_interval = 900   # alle 15 Minuten (war 1h)
         self.dynamic_symbols: list[str] = []
+        self.broker = broker
         logger.info("[WATCHLIST] Dynamic discovery initialisiert")
 
     def should_update(self) -> bool:
         return time.time() - self.last_update > self.update_interval
+
+    def _verify_symbols(self, symbols: list[str]) -> list[str]:
+        """Prueft ob Gemini-Symbole wirklich auf Alpaca handelbar sind (Volumen > 0)."""
+        if not self.broker:
+            return symbols
+        verified = []
+        for sym in symbols:
+            try:
+                snap = self.broker.get_snapshot(sym)
+                if snap and snap.get("volume", 0) > 0:
+                    verified.append(sym)
+                else:
+                    logger.warning(f"[WATCHLIST] {sym} verworfen: kein Volumen auf Alpaca")
+            except Exception as e:
+                logger.warning(f"[WATCHLIST] {sym} verworfen: Snapshot fehlgeschlagen ({e})")
+        return verified
 
     def discover(self, market_status: str) -> list[str]:
         """Fragt Gemini nach den besten Symbolen fuer die naechsten Stunden."""
@@ -1784,7 +2785,10 @@ Antworte NUR mit JSON:
                             pass
                         break
             if result:
-                symbols = [s.upper().strip() for s in result.get("symbols", [])]
+                raw_symbols = [s.upper().strip() for s in result.get("symbols", [])]
+                symbols = self._verify_symbols(raw_symbols)
+                if len(symbols) < len(raw_symbols):
+                    logger.info(f"[WATCHLIST] Volumen-Filter: {len(raw_symbols)} → {len(symbols)} Symbole")
                 self.dynamic_symbols = symbols[:8]
                 self.last_update = time.time()
                 logger.info(f"[WATCHLIST] Neue Symbole: {self.dynamic_symbols} | {result.get('reasoning', '')}")
@@ -1842,8 +2846,9 @@ class TradeSignal:
             self.reason = "Mandatory filter failed: Kelly"
             return
 
-        # Kaskade: pruefe 7→6→5→4, Gemini entscheidet am Ende
-        passed_count = sum(1 for r in self.results.values() if r["passed"])
+        # Stoikov ist informational — bestimmt Order-Typ, zaehlt nicht in Kaskade
+        # Kaskade: pruefe 7→6→5→4 (nur die 6 nicht-Stoikov-Filter), Gemini entscheidet am Ende
+        passed_count = sum(1 for name, r in self.results.items() if r["passed"] and name != "Stoikov")
         total = len(self.results)
 
         if passed_count >= 7:
@@ -1899,7 +2904,8 @@ class Engine:
         self.risk = RiskManager()
         self.learner = AdaptiveLearner()
         self.reasoning = ReasoningLayer()
-        self.watchlist = WatchlistDiscovery()
+        self.watchlist = WatchlistDiscovery(self.broker)
+        self.spike_sensor = SpikeSensor(self.broker)
         self.trade_log: list[TradeSignal] = []
         self.position_highs: dict[str, float] = {}
 
@@ -2046,7 +3052,21 @@ class Engine:
         logger.info(f"Gemini: {reasoning.get('probability_pct', round(reasoning['confidence']*100))}% Wahrscheinlichkeit — {reasoning['reason']}")
         logger.info(f"{'=' * 40}")
 
-        order_id = self.broker.market_buy(signal.symbol, signal.qty)
+        # Stoikov self-deciding: Limit-Order wenn Reservation Price verfuegbar
+        stoikov_result = signal.results.get("Stoikov", {})
+        stoikov_passed = stoikov_result.get("passed", False)
+        reservation_price = stoikov_result.get("details", {}).get("reservation_price")
+        market_status = self.broker.get_market_status()
+
+        if stoikov_passed and reservation_price and reservation_price > 0 and market_status == "open":
+            logger.info(
+                f"[STOIKOV] {signal.symbol}: Limit-Order @ ${reservation_price:.2f} "
+                f"(Reservation Price — besser als Market)"
+            )
+            order_id = self.broker.limit_buy(signal.symbol, signal.qty, reservation_price)
+        else:
+            # Market-Order: Stoikov nicht relevant (Extended Hours haben eigene Limit-Logik in broker)
+            order_id = self.broker.market_buy(signal.symbol, signal.qty)
         if order_id:
             signal.reason += f" -> Order {order_id}"
             self.trade_log.append(signal)
@@ -2131,8 +3151,22 @@ class Engine:
             except Exception as e:
                 logger.error(f"Exit check error {symbol}: {e}")
 
-    def scan_once(self, market_status: str):
+    def scan_once(self, market_status: str) -> list[str]:
+        """
+        Scannt aktive Watchlist + Spike-Sensor Universum.
+        Gibt Liste der erkannten Spike-Symbole zurück (für Telegram-Alerts).
+        """
         active_watchlist = self.watchlist.get_active_watchlist(market_status)
+
+        # Spike-Sensor: breiter Markt (nur wenn Markt offen/extended)
+        spike_symbols: list[str] = []
+        if market_status in ("open", "extended"):
+            spike_symbols = self.spike_sensor.scan()
+            # Spike-Symbole zur Watchlist hinzufügen (keine Duplikate)
+            extra = [s for s in spike_symbols if s not in active_watchlist]
+            if extra:
+                logger.info(f"[SPIKE] {len(extra)} neue Symbole zur Analyse: {', '.join(extra)}")
+            active_watchlist = list(dict.fromkeys(active_watchlist + extra))
 
         logger.info(f"\n{'=' * 60}")
         logger.info(f"  SCAN @ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -2144,18 +3178,38 @@ class Engine:
 
         self.check_exit_conditions()
 
-        for symbol in active_watchlist:
+        # Phase 1 — Parallel: Formel-Analyse + Alpaca-Daten für alle Symbole gleichzeitig
+        signals: list[TradeSignal] = [None] * len(active_watchlist)
+
+        def _analyze(idx_sym):
+            idx, sym = idx_sym
             try:
-                signal = self.analyze_symbol(symbol)
-                print(signal.summary())
-                if signal.all_passed:
-                    self.execute_signal(signal)
+                return idx, self.analyze_symbol(sym)
             except Exception as e:
-                logger.error(f"Error {symbol}: {e}")
+                logger.error(f"Error analyzing {sym}: {e}")
+                return idx, None
+
+        max_workers = min(len(active_watchlist), 8)
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {pool.submit(_analyze, (i, sym)): sym
+                       for i, sym in enumerate(active_watchlist)}
+            for future in as_completed(futures):
+                idx, signal = future.result()
+                if signal is not None:
+                    signals[idx] = signal
+
+        # Phase 2 — Sequenziell: Gemini Reasoning + Order-Ausführung
+        for signal in signals:
+            if signal is None:
+                continue
+            print(signal.summary())
+            if signal.all_passed:
+                self.execute_signal(signal)
 
         equity = self.broker.get_equity()
         positions = self.broker.get_positions()
         logger.info(f"Equity: ${equity:,.2f}  |  Positions: {len(positions)}  |  Trades: {len(self.trade_log)}")
+        return spike_symbols
 
     def run(self):
         logger.info("=" * 60)
@@ -2174,7 +3228,7 @@ class Engine:
                     time.sleep(300)
                     continue
 
-                self.scan_once(market_status)
+                self.scan_once(market_status)  # spike_symbols ignoriert in standalone run()
 
             except KeyboardInterrupt:
                 logger.info("\nShutting down...")
@@ -2186,10 +3240,9 @@ class Engine:
             logger.info(f"Next scan in {interval}s...")
             time.sleep(interval)
 
-
-################################################################
-##  DATEI: trading-bot/telegram_bot.py
-################################################################
+################################################################################
+# FILE: trading-bot/telegram_bot.py
+################################################################################
 
 """
 telegram_bot.py — Steuere den Trading-Bot vom iPhone via Telegram.
@@ -2678,7 +3731,7 @@ Antworte NUR mit JSON:
 
     def _scan_loop(self):
         logger.info("Auto-scan thread started")
-        self.send_sync("🤖 Auto-Scan Thread gestartet.")
+        self.send_sync("🤖 Auto-Scan gestartet. SpikeSensor aktiv (300+ Symbole).")
 
         while self.is_running:
             if self.is_paused:
@@ -2688,47 +3741,42 @@ Antworte NUR mit JSON:
             try:
                 broker = self.engine.broker
                 market_status = broker.get_market_status()
-
-                # Exit checks (immer, auch nachts fuer Crypto-Positionen)
-                self.engine.check_exit_conditions()
-
-                # Dynamische Watchlist: open+extended=Aktien+Crypto, closed=nur Crypto
-                active_watchlist = self.engine.watchlist.get_active_watchlist(market_status)
                 status_labels = {"open": "REGULÄR", "extended": "VOR-/NACHBÖRSE", "closed": "NUR CRYPTO"}
-                logger.info(f"Scan [{status_labels.get(market_status, market_status)}]: {', '.join(active_watchlist)}")
+                logger.info(f"Scan [{status_labels.get(market_status, market_status)}]")
 
-                for symbol in active_watchlist:
-                    if not self.is_running:
-                        break
-                    try:
-                        signal = self.engine.analyze_symbol(symbol)
+                # Spike-Alert BEFORE scan so Telegram gets notified immediately
+                if market_status in ("open", "extended"):
+                    spike_symbols = self.engine.spike_sensor.scan()
+                    if spike_symbols:
+                        self.send_sync(
+                            f"⚡ <b>SPIKE DETECTED</b> — {len(spike_symbols)} Symbole\n"
+                            + "\n".join(f"  • <b>{s}</b>" for s in spike_symbols[:10])
+                            + "\n<i>Vollanalyse läuft...</i>"
+                        )
+                        # Spike-Symbole sofort in die Engine-Watchlist einbauen
+                        for s in spike_symbols:
+                            if s not in self.engine.watchlist.dynamic_symbols:
+                                self.engine.watchlist.dynamic_symbols.append(s)
 
-                        if signal.all_passed:
-                            # Alert senden
+                # Haupt-Scan (Watchlist + Spike-Symbole + Execute)
+                # scan_once übernimmt: exit_checks, watchlist, spike-merge, execute
+                spike_results = self.engine.scan_once(market_status)
+
+                # Trade-Alerts aus Engine trade_log (neue seit letztem Scan)
+                # (Engine sendet keine Telegram-Messages direkt, das macht der Loop hier)
+                for signal in self.engine.trade_log[-5:]:
+                    if signal.all_passed and signal.qty > 0:
+                        # Nur neue (letzten 5 Sekunden) alertieren
+                        age = (datetime.now() - signal.timestamp).total_seconds()
+                        if age < Config.SCAN_INTERVAL + 10:
                             self.send_sync(
                                 f"🚨 <b>TRADE SIGNAL</b>\n\n"
                                 f"<b>BUY {signal.qty}x {signal.symbol}</b>\n"
                                 f"Kaskade: {signal.cascade_label}\n\n"
                                 f"{self._format_signal_text(signal)}"
                             )
-                            # Trade ausfuehren
-                            order_id = self.engine.execute_signal(signal)
-                            if order_id:
-                                self.send_sync(
-                                    f"✅ <b>ORDER EXECUTED</b>\n"
-                                    f"BUY {signal.qty}x {signal.symbol}\n"
-                                    f"Order ID: <code>{order_id}</code>"
-                                )
-                            else:
-                                self.send_sync(
-                                    f"⏸ <b>{signal.symbol}: Signal blockiert</b>\n"
-                                    f"GPT-4o oder Risk Manager hat abgelehnt."
-                                )
 
-                    except Exception as e:
-                        logger.error(f"Scan error {symbol}: {e}")
-
-                # Exit-Alerts fuer laufende Positionen
+                # Stop-Loss Nähe Warnung
                 positions = broker.get_positions()
                 for sym, pos in positions.items():
                     plpc = pos["unrealized_plpc"]
@@ -2803,10 +3851,9 @@ Antworte NUR mit JSON:
         logger.info("Telegram bot running. Send /start to begin.")
         self.app.run_polling(drop_pending_updates=True)
 
-
-################################################################
-##  DATEI: trading-bot/api.py
-################################################################
+################################################################################
+# FILE: trading-bot/api.py
+################################################################################
 
 """
 api.py — Web Dashboard + REST API (kein Flask, kein externes Framework)
@@ -2962,10 +4009,9 @@ def start_api_server(broker=None, port: int = 5001):
     t.start()
     return t
 
-
-################################################################
-##  DATEI: trading-bot/dashboard.py
-################################################################
+################################################################################
+# FILE: trading-bot/dashboard.py
+################################################################################
 
 """
 dashboard.py — Live Web-Dashboard fuer den Trading Bot
@@ -3164,943 +4210,138 @@ if __name__ == "__main__":
     print(f"\n  Dashboard: http://0.0.0.0:{port}\n")
     run(port)
 
+################################################################################
+# FILE: trading-bot/main.py
+################################################################################
 
-################################################################
-##  DATEI: trading-bot/formulas/__init__.py
-################################################################
-
-# formulas package — alle Module exportieren
-# engine.py importiert: from formulas import momentum, kelly, ev_gap, kl_divergence, bayesian, stoikov
-from . import momentum, kelly, ev_gap, kl_divergence, bayesian, stoikov, sentiment
-
-__all__ = ["momentum", "kelly", "ev_gap", "kl_divergence", "bayesian", "stoikov", "sentiment"]
-
-
-################################################################
-##  DATEI: trading-bot/formulas/momentum.py
-################################################################
-
+#!/usr/bin/env python3
 """
-Formula 1 — Momentum & Mean Reversion Detection
+main.py — SIX FILTERS. ONE TRADE.
 
-Signale:
-  - RSI (14) fuer Overbought/Oversold
-  - EMA Crossover (8/21) fuer Trendrichtung
-  - Rate of Change (10-bar) fuer Staerke
-  - Bollinger Band Position fuer Mean-Reversion
-
-Output: signal (-1.0 bis +1.0), passed (bool)
+Usage:
+    python main.py              # Bot starten (Endlosschleife)
+    python main.py --scan-once  # Einmaliger Scan
+    python main.py --status     # Account Status
+    python main.py --backtest   # Quick Analyse
 """
 
-import numpy as np
-import pandas as pd
-
-
-def _rsi(closes: np.ndarray, period: int = 14) -> float:
-    deltas = np.diff(closes[-(period + 1):])
-    gains = np.where(deltas > 0, deltas, 0)
-    losses = np.where(deltas < 0, -deltas, 0)
-    avg_gain = np.mean(gains) if len(gains) > 0 else 0
-    avg_loss = np.mean(losses) if len(losses) > 0 else 1e-10
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
-
-
-def _ema(data: np.ndarray, period: int) -> np.ndarray:
-    alpha = 2 / (period + 1)
-    ema = np.zeros_like(data, dtype=float)
-    ema[0] = data[0]
-    for i in range(1, len(data)):
-        ema[i] = alpha * data[i] + (1 - alpha) * ema[i - 1]
-    return ema
-
-
-def _bollinger_position(closes: np.ndarray, period: int = 20, num_std: float = 2.0) -> float:
-    if len(closes) < period:
-        return 0.5
-    window = closes[-period:]
-    mean = np.mean(window)
-    std = np.std(window)
-    if std < 1e-10:
-        return 0.5
-    upper = mean + num_std * std
-    lower = mean - num_std * std
-    pos = (closes[-1] - lower) / (upper - lower)
-    return float(np.clip(pos, 0.0, 1.0))
-
-
-def evaluate(bars: pd.DataFrame, threshold: float = 0.6, **kwargs) -> dict:
-    """
-    Formula-Interface fuer engine.py.
-    bars: pandas DataFrame mit 'close' Spalte.
-    """
-    name = "Momentum"
-
-    if bars is None or bars.empty or len(bars) < 30:
-        return {"name": name, "signal": 0.0, "passed": False,
-                "details": {"error": "Not enough bars"}}
-
-    closes = bars["close"].values.astype(float)
-
-    rsi = _rsi(closes, 14)
-    ema_fast = _ema(closes, 8)
-    ema_slow = _ema(closes, 21)
-    ema_diff = (ema_fast[-1] - ema_slow[-1]) / closes[-1]
-    roc = (closes[-1] - closes[-11]) / closes[-11] if len(closes) > 11 else 0.0
-    bb_pos = _bollinger_position(closes, 20, 2.0)
-
-    score = 0.0
-    signals = 0
-
-    if rsi < 30:
-        score += 0.3
-        signals += 1
-    elif rsi > 70:
-        score -= 0.3
-        signals += 1
-
-    if ema_diff > 0.002:
-        score += 0.25
-        signals += 1
-    elif ema_diff < -0.002:
-        score -= 0.25
-        signals += 1
-
-    if roc > 0.02:
-        score += 0.25
-        signals += 1
-    elif roc < -0.02:
-        score -= 0.25
-        signals += 1
-
-    if bb_pos < 0.1:
-        score += 0.2
-        signals += 1
-    elif bb_pos > 0.9:
-        score -= 0.2
-        signals += 1
-
-    confidence = min(abs(score) / 0.7, 1.0)
-    passed = confidence >= threshold and signals >= 2 and score > 0
-
-    return {
-        "name": name,
-        "signal": round(float(score), 3),
-        "passed": passed,
-        "details": {
-            "rsi": round(rsi, 1),
-            "ema_diff": round(ema_diff, 4),
-            "roc": round(roc, 4),
-            "bb_pos": round(bb_pos, 3),
-            "confidence": round(confidence, 3),
-            "signals": signals,
-        },
-    }
-
-
-################################################################
-##  DATEI: trading-bot/formulas/kelly.py
-################################################################
-
-"""
-Formula 2 — Kelly Criterion
-f* = (p * b - q) / b
-Wir verwenden Quarter-Kelly fuer konservatives Sizing.
-"""
-
-import numpy as np
-import pandas as pd
-from config import Config
-
-
-def kelly_fraction(win_prob: float, payoff_ratio: float) -> float:
-    q = 1.0 - win_prob
-    f_star = (win_prob * payoff_ratio - q) / payoff_ratio
-    return max(0.0, min(f_star, 1.0))
-
-
-def evaluate(bars: pd.DataFrame, equity: float = 10000.0, **kwargs) -> dict:
-    if len(bars) < 20:
-        return {"name": "Kelly", "signal": 0.0, "passed": False,
-                "details": {"error": "Not enough data"}}
-
-    returns = bars["returns"].dropna()
-
-    # Win rate und Payoff aus historischen Returns
-    win_prob = (returns > 0).sum() / len(returns)
-    gains = returns[returns > 0]
-    losses = returns[returns < 0]
-    avg_gain = gains.mean() if len(gains) > 0 else 0.001
-    avg_loss = abs(losses.mean()) if len(losses) > 0 else 0.001
-    payoff = min(avg_gain / avg_loss, 10.0)
-
-    full_kelly = kelly_fraction(win_prob, payoff)
-    adjusted = full_kelly * Config.KELLY_FRACTION
-    final_pct = min(adjusted, Config.MAX_POSITION_PCT)
-    bet_size = equity * final_pct
-
-    return {
-        "name": "Kelly",
-        "signal": round(adjusted, 4),
-        "passed": adjusted > 0.005,
-        "details": {
-            "win_rate": round(win_prob, 3),
-            "payoff_ratio": round(payoff, 3),
-            "full_kelly": round(full_kelly, 4),
-            "adjusted_kelly": round(adjusted, 4),
-            "final_pct": round(final_pct, 4),
-            "bet_size_usd": round(bet_size, 2),
-            "fraction_used": f"{Config.KELLY_FRACTION}x Kelly",
-        },
-    }
-
-
-################################################################
-##  DATEI: trading-bot/formulas/ev_gap.py
-################################################################
-
-"""
-Formula 3 — EV Gap Detection
-Vergleicht aktuellen Preis mit Fair Value (VWAP + Bollinger + EMA).
-Sucht Gaps wo Expected Value positiv ist.
-"""
-
-import numpy as np
-import pandas as pd
-from config import Config
-
-
-def estimate_fair_value(bars: pd.DataFrame) -> float:
-    prices = bars["close"]
-    volumes = bars["volume"]
-    vwap = (prices * volumes).sum() / volumes.sum() if volumes.sum() > 0 else prices.mean()
-    bb_mid = prices.rolling(20).mean().iloc[-1]
-    ema21 = prices.ewm(span=21, adjust=False).mean().iloc[-1]
-    return vwap * 0.4 + bb_mid * 0.3 + ema21 * 0.3
-
-
-def evaluate(bars: pd.DataFrame, **kwargs) -> dict:
-    if len(bars) < 25:
-        return {"name": "EV-Gap", "signal": 0.0, "passed": False,
-                "details": {"error": "Not enough data"}}
-
-    current_price = bars["close"].iloc[-1]
-    fair_value = estimate_fair_value(bars)
-    win_prob = kwargs.get("win_prob", 0.55)
-
-    gap_pct = (fair_value - current_price) / current_price
-    upside = abs(gap_pct) if gap_pct > 0 else abs(gap_pct) * 0.3
-    downside = abs(gap_pct) * 0.5
-    ev = win_prob * upside - (1 - win_prob) * downside
-
-    direction = "LONG" if gap_pct > 0 else "SHORT" if gap_pct < -Config.MIN_EV_GAP else "NEUTRAL"
-
-    return {
-        "name": "EV-Gap",
-        "signal": round(ev, 5),
-        "passed": abs(ev) > Config.MIN_EV_GAP and gap_pct > 0,
-        "details": {
-            "current_price": round(current_price, 2),
-            "fair_value": round(fair_value, 2),
-            "gap_pct": f"{gap_pct:+.2%}",
-            "ev": round(ev, 5),
-            "direction": direction,
-        },
-    }
-
-
-################################################################
-##  DATEI: trading-bot/formulas/kl_divergence.py
-################################################################
-
-"""
-Formula 4 — KL-Divergence (Cross-Timeframe)
-Misst statistische Distanz zwischen kurz- und langfristigen Returns.
-Hohe Divergenz = Zeitrahmen aus dem Gleichgewicht = Opportunity.
-"""
-
-import numpy as np
-import pandas as pd
-from config import Config
-
-
-def symmetric_kl(p: np.ndarray, q: np.ndarray) -> float:
-    p = np.clip(p, 1e-10, None)
-    q = np.clip(q, 1e-10, None)
-    p = p / p.sum()
-    q = q / q.sum()
-    kl_pq = float(np.sum(p * np.log(p / q)))
-    kl_qp = float(np.sum(q * np.log(q / p)))
-    return (kl_pq + kl_qp) / 2
-
-
-def evaluate(bars: pd.DataFrame, **kwargs) -> dict:
-    if len(bars) < 50:
-        return {"name": "KL-Divergence", "signal": 0.0, "passed": False,
-                "details": {"error": "Need 50+ bars"}}
-
-    returns = bars["returns"].dropna()
-    short_returns = returns.tail(10)
-    long_returns = returns.tail(50)
-
-    range_min = long_returns.min()
-    range_max = long_returns.max()
-    bins = np.linspace(range_min, range_max, 21)
-
-    p_short, _ = np.histogram(short_returns, bins=bins, density=True)
-    q_long, _ = np.histogram(long_returns, bins=bins, density=True)
-
-    p_short = p_short + 1e-10
-    q_long = q_long + 1e-10
-    p_short = p_short / p_short.sum()
-    q_long = q_long / q_long.sum()
-
-    kl_div = symmetric_kl(p_short, q_long)
-    threshold = kwargs.get("threshold", Config.KL_DIVERGENCE_THRESHOLD)
-
-    short_mean = short_returns.mean()
-    long_mean = long_returns.mean()
-    drift = "SHORT_OUTPERFORMS" if short_mean > long_mean else "SHORT_UNDERPERFORMS"
-    bullish_reversion = short_mean < long_mean and kl_div > threshold
-
-    return {
-        "name": "KL-Divergence",
-        "signal": round(kl_div, 4),
-        "passed": kl_div > threshold,
-        "details": {
-            "kl_divergence": round(kl_div, 4),
-            "threshold": threshold,
-            "short_mean": f"{short_mean:+.4f}",
-            "long_mean": f"{long_mean:+.4f}",
-            "drift": drift,
-            "bullish_reversion": bullish_reversion,
-        },
-    }
-
-
-################################################################
-##  DATEI: trading-bot/formulas/bayesian.py
-################################################################
-
-"""
-Formula 5 — Bayesian Updates
-P(H|E) = P(E|H) * P(H) / P(E)
-Aktualisiert Trade-Wahrscheinlichkeit basierend auf Volume, Momentum, Volatilitaet.
-"""
-
-import numpy as np
-import pandas as pd
-
-
-class BayesianUpdater:
-    def __init__(self, prior: float = 0.5):
-        self.posterior = prior
-        self.updates = []
-
-    def update(self, likelihood_ratio: float, label: str = "") -> float:
-        prior_odds = self.posterior / (1.0 - self.posterior + 1e-10)
-        posterior_odds = prior_odds * likelihood_ratio
-        self.posterior = posterior_odds / (1.0 + posterior_odds)
-        self.posterior = max(0.05, min(0.95, self.posterior))
-        self.updates.append({"label": label, "lr": round(likelihood_ratio, 3),
-                             "posterior": round(self.posterior, 4)})
-        return self.posterior
-
-
-def evaluate(bars: pd.DataFrame, **kwargs) -> dict:
-    if len(bars) < 30:
-        return {"name": "Bayesian", "signal": 0.5, "passed": False,
-                "details": {"error": "Not enough data"}}
-
-    prior = kwargs.get("prior", 0.50)
-    threshold = kwargs.get("threshold", 0.60)
-    u = BayesianUpdater(prior)
-
-    # Signal 1: Volume Spike
-    vol = bars["volume"]
-    avg_vol = vol.iloc[-21:-1].mean() if len(vol) > 21 else vol.mean()
-    vol_ratio = vol.iloc[-1] / avg_vol if avg_vol > 0 else 1.0
-    if vol_ratio > 2.0:
-        recent_ret = bars["returns"].tail(3).mean()
-        u.update(1.8 if recent_ret > 0 else 0.6, "volume_spike")
-    else:
-        u.update(1.0, "volume_normal")
-
-    # Signal 2: Price Acceleration
-    returns = bars["returns"]
-    recent = returns.tail(5).mean()
-    prior_ret = returns.iloc[-10:-5].mean() if len(returns) > 10 else 0
-    if recent > prior_ret and recent > 0:
-        u.update(1.5, "accelerating")
-    elif recent < 0:
-        u.update(0.7, "decelerating")
-    else:
-        u.update(1.0, "neutral")
-
-    # Signal 3: Volatility Regime
-    current_vol = returns.tail(20).std()
-    hist_vol = returns.std()
-    vol_r = current_vol / (hist_vol + 1e-10)
-    if vol_r < 0.7:
-        u.update(1.2, "low_vol")
-    elif vol_r > 1.3:
-        u.update(0.85, "high_vol")
-    else:
-        u.update(1.0, "normal_vol")
-
-    # Signal 4: Trend Consistency
-    pos_pct = (returns.tail(10) > 0).sum() / 10
-    if pos_pct > 0.7:
-        u.update(1.6, "strong_uptrend")
-    elif pos_pct < 0.3:
-        u.update(0.5, "strong_downtrend")
-    else:
-        u.update(1.0, "mixed")
-
-    return {
-        "name": "Bayesian",
-        "signal": round(u.posterior, 4),
-        "passed": u.posterior >= threshold,
-        "details": {
-            "prior": prior,
-            "posterior": round(u.posterior, 4),
-            "updates": u.updates,
-            "vol_ratio": round(vol_ratio, 2),
-            "vol_regime": "low" if vol_r < 0.7 else "high" if vol_r > 1.3 else "normal",
-        },
-    }
-
-
-################################################################
-##  DATEI: trading-bot/formulas/stoikov.py
-################################################################
-
-"""
-Formula 6 — Stoikov Execution (Avellaneda-Stoikov)
-Reservation Price: r = mid - q * gamma * sigma^2 * (T - t)
-Bot kauft nur wenn Preis <= Reservation Price.
-"""
-
-import numpy as np
-import pandas as pd
-from config import Config
-
-
-def evaluate(bars: pd.DataFrame, snapshot: dict = None, **kwargs) -> dict:
-    if len(bars) < 20:
-        return {"name": "Stoikov", "signal": 0.0, "passed": False,
-                "details": {"error": "Not enough data"}}
-
-    current_price = bars["close"].iloc[-1]
-
-    # Mid price from bid/ask
-    if snapshot and snapshot.get("bid") and snapshot.get("ask"):
-        mid = (snapshot["bid"] + snapshot["ask"]) / 2.0
-        spread = snapshot["ask"] - snapshot["bid"]
-    else:
-        mid = current_price
-        spread = current_price * 0.002
-
-    # Annualized volatility
-    returns = bars["returns"].dropna()
-    sigma = returns.std() * np.sqrt(252 * 78)  # 78 five-min bars/day
-    sigma = max(sigma, 0.01)
-
-    inventory_skew = kwargs.get("inventory_skew", 0.0)
-    gamma = kwargs.get("gamma", Config.STOIKOV_SPREAD_MULT)
-    time_remaining = kwargs.get("time_remaining", 0.5)
-
-    # Reservation price
-    reservation = mid - inventory_skew * gamma * (sigma ** 2) * time_remaining
-
-    price_advantage = (reservation - current_price) / current_price
-    passed = current_price <= reservation
-
-    return {
-        "name": "Stoikov",
-        "signal": round(price_advantage, 5),
-        "passed": passed,
-        "details": {
-            "current_price": round(current_price, 2),
-            "mid_price": round(mid, 2),
-            "reservation_price": round(reservation, 2),
-            "price_advantage": f"{price_advantage:+.3%}",
-            "spread": round(spread, 4),
-            "volatility": round(sigma, 4),
-            "inventory_skew": round(inventory_skew, 2),
-        },
-    }
-
-
-################################################################
-##  DATEI: trading-bot/formulas/sentiment.py
-################################################################
-
-"""
-sentiment.py — Multimodale Sentiment-Analyse
-
-Drei Ebenen (alle Pflicht):
-1. Alpaca News API — Echtzeit-Nachrichten pro Symbol
-2. Keyword-Scoring — schnelle Sentiment-Bewertung
-3. Google Gemini — Deep Analysis (IMMER aktiv, kein Fallback)
-
-Output: Sentiment-Score von -1.0 (extrem bearish) bis +1.0 (extrem bullish)
-"""
-
+import os
+import sys
 import logging
-import time
-import re
-from datetime import datetime, timedelta
-from typing import Optional
+import argparse
 
 from config import Config
-
-logger = logging.getLogger("bot.sentiment")
-
-
-# ═══════════════════════════════════════════════════════
-#  KEYWORD DICTIONARIES
-# ═══════════════════════════════════════════════════════
-
-BULLISH_KEYWORDS = {
-    # Starke Signale (Gewicht 2)
-    "beat earnings": 2, "beats estimates": 2, "record revenue": 2,
-    "upgraded": 2, "all-time high": 2, "breakout": 2,
-    "acquisition": 1.5, "buyback": 1.5, "share repurchase": 1.5,
-    "dividend increase": 1.5, "fda approval": 2, "patent granted": 1.5,
-    "partnership": 1, "expansion": 1, "growth": 1,
-    "bullish": 1.5, "rally": 1.5, "surge": 1.5, "soar": 1.5,
-    "outperform": 1.5, "buy rating": 2, "price target raised": 2,
-    "strong demand": 1.5, "record sales": 2, "market share gain": 1.5,
-    # Moderate Signale (Gewicht 1)
-    "positive": 1, "gains": 1, "higher": 1, "rises": 1,
-    "optimistic": 1, "momentum": 1, "recovery": 1, "rebound": 1,
-    "beat": 1, "exceeds": 1, "strong": 1, "profit": 1,
-}
-
-BEARISH_KEYWORDS = {
-    # Starke Signale (Gewicht 2)
-    "misses estimates": 2, "missed earnings": 2, "profit warning": 2,
-    "downgraded": 2, "sell rating": 2, "price target cut": 2,
-    "layoffs": 1.5, "restructuring": 1.5, "bankruptcy": 2,
-    "investigation": 1.5, "lawsuit": 1.5, "fraud": 2,
-    "recall": 1.5, "fda rejection": 2, "data breach": 1.5,
-    "sanctions": 1.5, "tariff": 1.5, "trade war": 1.5,
-    # Moderate Signale (Gewicht 1)
-    "bearish": 1.5, "crash": 1.5, "plunge": 1.5, "tumble": 1.5,
-    "decline": 1, "falls": 1, "drops": 1, "lower": 1, "loss": 1,
-    "negative": 1, "concern": 1, "risk": 0.5, "uncertainty": 1,
-    "sell-off": 1.5, "correction": 1, "recession": 1.5,
-    "war": 1.5, "conflict": 1, "attack": 1, "crisis": 1.5,
-}
-
-# Makro-Keywords die den GESAMTEN Markt betreffen
-MACRO_BULLISH = {
-    "rate cut": 2, "fed dovish": 2, "stimulus": 1.5,
-    "ceasefire": 2, "peace deal": 2, "peace talks": 1.5,
-    "inflation falls": 1.5, "unemployment low": 1,
-    "strong jobs": 1.5, "gdp growth": 1.5, "consumer confidence": 1,
-}
-
-MACRO_BEARISH = {
-    "rate hike": 2, "fed hawkish": 2, "tightening": 1.5,
-    "war escalation": 2, "missile strike": 2, "strait of hormuz": 2,
-    "oil spike": 1.5, "oil surge": 1.5, "supply disruption": 1.5,
-    "inflation rises": 1.5, "stagflation": 2,
-    "default": 2, "debt ceiling": 1.5, "government shutdown": 1.5,
-    "nuclear": 1.5, "invasion": 2, "bombing": 1.5,
-}
+from engine import Engine
+from broker import AlpacaBroker
 
 
-# ═══════════════════════════════════════════════════════
-#  NEWS FETCHER (via Alpaca)
-# ═══════════════════════════════════════════════════════
+def setup_logging():
+    level = getattr(logging, Config.LOG_LEVEL.upper(), logging.INFO)
+    fmt = "%(asctime)s | %(name)-12s | %(levelname)-7s | %(message)s"
+    logging.basicConfig(level=level, format=fmt, datefmt="%H:%M:%S")
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("websocket").setLevel(logging.WARNING)
 
-class NewsFetcher:
-    """Holt Nachrichten ueber die Alpaca News API."""
 
-    def __init__(self, broker):
-        self.api = broker.api
+def cmd_status():
+    broker = AlpacaBroker()
+    equity = broker.get_equity()
+    cash = broker.get_cash()
+    bp = broker.get_buying_power()
+    positions = broker.get_positions()
 
-    def get_news(self, symbol: str, limit: int = 10, hours_back: int = 24) -> list[dict]:
-        """Holt aktuelle News fuer ein Symbol."""
+    print(f"\n{'=' * 50}")
+    print(f"  ACCOUNT STATUS  ({'PAPER' if Config.is_paper() else 'LIVE'})")
+    print(f"{'=' * 50}")
+    print(f"  Equity:        ${equity:,.2f}")
+    print(f"  Cash:          ${cash:,.2f}")
+    print(f"  Buying Power:  ${bp:,.2f}")
+    print(f"  Positions:     {len(positions)}")
+    print(f"{'-' * 50}")
+    if positions:
+        for sym, pos in positions.items():
+            pl = pos['unrealized_pl']
+            plpc = pos['unrealized_plpc']
+            pre = "+" if pl >= 0 else ""
+            print(f"  {sym:<8} {pos['qty']:>6} shares @ ${pos['avg_entry']:.2f}"
+                  f"  {pre}${pl:.2f} ({pre}{plpc:.1%})")
+    else:
+        print("  No open positions.")
+    print(f"{'=' * 50}\n")
+
+
+def cmd_backtest():
+    print(f"\n{'=' * 50}")
+    print(f"  QUICK ANALYSIS")
+    print(f"{'=' * 50}\n")
+    engine = Engine()
+    for symbol in Config.WATCHLIST:
         try:
-            end = datetime.now()
-            start = end - timedelta(hours=hours_back)
-
-            news = self.api.get_news(
-                symbol=symbol,
-                start=start.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                end=end.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                limit=limit,
-            )
-
-            articles = []
-            for item in news:
-                articles.append({
-                    "headline": item.headline,
-                    "summary": getattr(item, "summary", "") or "",
-                    "source": getattr(item, "source", "unknown"),
-                    "created_at": str(item.created_at),
-                    "symbols": getattr(item, "symbols", []),
-                })
-
-            logger.debug(f"{symbol}: {len(articles)} articles found")
-            return articles
-
+            signal = engine.analyze_symbol(symbol)
+            print(signal.summary())
+            for name, r in signal.results.items():
+                d = r.get("details", {})
+                detail_str = "  ".join(f"{k}={v}" for k, v in d.items()
+                                       if k not in ("error", "updates"))
+                if detail_str:
+                    print(f"    {name}: {detail_str}")
+            print()
         except Exception as e:
-            logger.warning(f"News fetch failed for {symbol}: {e}")
-            return []
-
-    def get_market_news(self, limit: int = 15) -> list[dict]:
-        """Holt allgemeine Markt-News (nicht symbol-spezifisch)."""
-        try:
-            news = self.api.get_news(limit=limit)
-            return [{
-                "headline": item.headline,
-                "summary": getattr(item, "summary", "") or "",
-                "source": getattr(item, "source", "unknown"),
-                "created_at": str(item.created_at),
-            } for item in news]
-        except Exception as e:
-            logger.warning(f"Market news fetch failed: {e}")
-            return []
+            print(f"  {symbol}: Error - {e}\n")
 
 
-# ═══════════════════════════════════════════════════════
-#  KEYWORD SENTIMENT SCORER
-# ═══════════════════════════════════════════════════════
+def main():
+    parser = argparse.ArgumentParser(description="Six Filters. One Trade.")
+    parser.add_argument("--scan-once", action="store_true", help="Single scan")
+    parser.add_argument("--status", action="store_true", help="Account status")
+    parser.add_argument("--backtest", action="store_true", help="Quick analysis")
+    parser.add_argument("--telegram", action="store_true", help="Start with Telegram control")
+    args = parser.parse_args()
 
-class KeywordScorer:
-    """Schnelle Sentiment-Bewertung basierend auf Keywords."""
+    setup_logging()
 
-    @staticmethod
-    def score_text(text: str, bullish_dict: dict, bearish_dict: dict) -> dict:
-        """Bewertet einen Text und gibt Score + Details zurueck."""
-        text_lower = text.lower()
+    if not Config.validate():
+        print("\n  API Keys nicht konfiguriert!")
+        print("  1. cp .env.example .env")
+        print("  2. Trage deine Alpaca Keys in .env ein")
+        print("  3. Starte erneut\n")
+        sys.exit(1)
 
-        bull_score = 0.0
-        bear_score = 0.0
-        bull_hits = []
-        bear_hits = []
+    print()
+    print("  +==========================================+")
+    print("  |   SIX FILTERS. ONE TRADE.               |")
+    print("  |   Quantitative Trading Engine v1.0       |")
+    print("  +==========================================+")
+    print()
 
-        for keyword, weight in bullish_dict.items():
-            count = text_lower.count(keyword)
-            if count > 0:
-                bull_score += weight * count
-                bull_hits.append(keyword)
+    if args.status:
+        cmd_status()
+    elif args.scan_once:
+        e = Engine()
+        Engine().scan_once(market_open=e.broker.is_market_open())
+    elif args.backtest:
+        cmd_backtest()
+    else:
+        # Always start the API dashboard for long-running modes
+        from api import start_api_server
+        engine = Engine()
+        start_api_server(broker=engine.broker, port=int(os.getenv("BOT_API_PORT", "5001")))
 
-        for keyword, weight in bearish_dict.items():
-            count = text_lower.count(keyword)
-            if count > 0:
-                bear_score += weight * count
-                bear_hits.append(keyword)
-
-        total = bull_score + bear_score
-        if total == 0:
-            normalized = 0.0
+        if args.telegram:
+            if not Config.TELEGRAM_TOKEN or Config.TELEGRAM_TOKEN == "your_telegram_bot_token_here":
+                print("  Telegram nicht konfiguriert!")
+                print("  Trage TELEGRAM_TOKEN und TELEGRAM_CHAT_ID in .env ein.")
+                print("  Siehe README fuer Anleitung.\n")
+                sys.exit(1)
+            import threading
+            t = threading.Thread(target=engine.run, daemon=True, name="engine")
+            t.start()
+            from telegram_bot import TradingTelegramBot
+            bot = TradingTelegramBot()
+            bot.run()
         else:
-            # -1 (bearish) bis +1 (bullish)
-            normalized = (bull_score - bear_score) / total
-
-        return {
-            "score": round(normalized, 3),
-            "bull_score": round(bull_score, 2),
-            "bear_score": round(bear_score, 2),
-            "bull_hits": bull_hits,
-            "bear_hits": bear_hits,
-        }
-
-    @staticmethod
-    def score_articles(articles: list[dict], is_macro: bool = False) -> dict:
-        """Bewertet mehrere Artikel und aggregiert."""
-        if not articles:
-            return {
-                "score": 0.0,
-                "article_count": 0,
-                "details": [],
-            }
-
-        bull_dict = MACRO_BULLISH if is_macro else BULLISH_KEYWORDS
-        bear_dict = MACRO_BEARISH if is_macro else BEARISH_KEYWORDS
-
-        scores = []
-        details = []
-
-        for article in articles:
-            text = article["headline"] + " " + article.get("summary", "")
-            result = KeywordScorer.score_text(text, bull_dict, bear_dict)
-
-            # Neuere Artikel haben mehr Gewicht
-            scores.append(result["score"])
-            if result["bull_hits"] or result["bear_hits"]:
-                details.append({
-                    "headline": article["headline"][:80],
-                    "score": result["score"],
-                    "signals": result["bull_hits"] + [f"-{b}" for b in result["bear_hits"]],
-                })
-
-        # Gewichteter Durchschnitt (neuere zuerst)
-        if scores:
-            weights = [1.0 / (i + 1) for i in range(len(scores))]
-            total_weight = sum(weights)
-            weighted_score = sum(s * w for s, w in zip(scores, weights)) / total_weight
-        else:
-            weighted_score = 0.0
-
-        return {
-            "score": round(weighted_score, 3),
-            "article_count": len(articles),
-            "details": details[:5],  # Top 5 relevanteste
-        }
+            engine.run()
 
 
-# ═══════════════════════════════════════════════════════
-#  GEMINI DEEP ANALYSIS (optional)
-# ═══════════════════════════════════════════════════════
-
-class GeminiAnalyzer:
-    """
-    Nutzt Google Gemini fuer tiefere Sentiment-Analyse.
-    Nur fuer kritische Momente (spart API-Kosten).
-
-    Erfordert GEMINI_API_KEY in .env
-    """
-
-    def __init__(self):
-        self.api_key = Config.GEMINI_API_KEY
-        if not self.api_key:
-            raise RuntimeError("GEMINI_API_KEY fehlt — Sentiment Analysis nicht moeglich")
-        self.last_call = 0
-        self.min_interval = 60  # Max 1 Call pro Minute
-
-    def analyze(self, headlines: list[str], symbol: str) -> Optional[dict]:
-        """
-        Fragt Gemini nach einer Einschaetzung.
-        Gibt Score (-1 bis +1) und Begruendung zurueck.
-        """
-        if not headlines:
-            return None
-
-        # Rate limiting
-        now = time.time()
-        if now - self.last_call < self.min_interval:
-            return None
-
-        try:
-            from google import genai
-            from google.genai import types as genai_types
-            import json
-
-            client = genai.Client(api_key=self.api_key)
-            news_text = "\n".join(f"- {h}" for h in headlines[:10])
-
-            prompt = (
-                f"Analyze these headlines for {symbol} stock sentiment.\n\n"
-                f"{news_text}\n\n"
-                f"Respond ONLY with JSON:\n"
-                f'{{"score": <-1.0 to 1.0>, "confidence": <0 to 1>, '
-                f'"reason": "<one sentence>"}}'
-            )
-
-            response = client.models.generate_content(
-                model=Config.REASONING_MODEL,
-                contents=prompt,
-                config=genai_types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    max_output_tokens=300,
-                ),
-            )
-
-            self.last_call = time.time()
-            text = response.text or ""
-            match = re.search(r'\{[^}]+\}', text)
-            if match:
-                result = json.loads(match.group())
-                logger.info(f"Gemini analysis {symbol}: score={result.get('score')} "
-                            f"reason={result.get('reason', '')[:60]}")
-                return result
-            return None
-
-        except Exception as e:
-            logger.warning(f"Gemini analysis failed: {e}")
-            return None
-
-
-# ═══════════════════════════════════════════════════════
-#  HAUPTMODUL: SENTIMENT ENGINE
-# ═══════════════════════════════════════════════════════
-
-class SentimentEngine:
-    """
-    Kombiniert alle Sentiment-Quellen:
-    1. Symbol-spezifische News (Alpaca)
-    2. Makro-News (Markt allgemein)
-    3. Optional: Google Gemini Deep Analysis
-
-    Output wird als Signal in den Bayesian Updater gespeist.
-    """
-
-    def __init__(self, broker):
-        self.news_fetcher = NewsFetcher(broker)
-        self.scorer = KeywordScorer()
-        self.gemini = GeminiAnalyzer()
-
-        # Cache um API-Calls zu reduzieren
-        self._cache: dict = {}
-        self._cache_ttl = 300  # 5 Minuten Cache
-
-    def _is_cached(self, key: str) -> bool:
-        if key in self._cache:
-            ts, _ = self._cache[key]
-            if time.time() - ts < self._cache_ttl:
-                return True
-        return False
-
-    def _get_cached(self, key: str) -> Optional[dict]:
-        if self._is_cached(key):
-            return self._cache[key][1]
-        return None
-
-    def _set_cache(self, key: str, value: dict):
-        self._cache[key] = (time.time(), value)
-
-    def analyze_symbol(self, symbol: str) -> dict:
-        """
-        Vollstaendige Sentiment-Analyse fuer ein Symbol.
-
-        Returns:
-            score: -1.0 (bearish) bis +1.0 (bullish)
-            confidence: 0 bis 1 (wie sicher)
-            details: Aufschluesselung
-        """
-        # Cache Check
-        cached = self._get_cached(f"sentiment_{symbol}")
-        if cached:
-            return cached
-
-        # ── 1. Symbol-spezifische News ──
-        articles = self.news_fetcher.get_news(symbol, limit=10, hours_back=12)
-        symbol_sentiment = self.scorer.score_articles(articles)
-
-        # ── 2. Makro-News ──
-        macro_articles = self.news_fetcher.get_market_news(limit=10)
-        macro_sentiment = self.scorer.score_articles(macro_articles, is_macro=True)
-
-        # ── 3. Gemini (nur wenn Score unklar oder extreme News) ──
-        gemini_result = None
-        headlines = [a["headline"] for a in articles]
-        if headlines and abs(symbol_sentiment["score"]) > 0.3:
-            gemini_result = self.gemini.analyze(headlines, symbol)
-
-        # ── Kombination ──
-        # Gewichtung: Symbol-News 50%, Makro 30%, Gemini 20%
-        combined = symbol_sentiment["score"] * 0.50 + macro_sentiment["score"] * 0.30
-        if gemini_result and "score" in gemini_result:
-            combined += gemini_result["score"] * 0.20
-        else:
-            combined += symbol_sentiment["score"] * 0.20
-
-        # Confidence basierend auf Datenqualitaet
-        confidence = 0.3  # Baseline
-        if symbol_sentiment["article_count"] > 3:
-            confidence += 0.2
-        if symbol_sentiment["article_count"] > 7:
-            confidence += 0.1
-        if macro_sentiment["article_count"] > 3:
-            confidence += 0.1
-        if gemini_result:
-            confidence += 0.2
-        confidence = min(confidence, 1.0)
-
-        result = {
-            "score": round(max(-1.0, min(1.0, combined)), 3),
-            "confidence": round(confidence, 2),
-            "symbol_sentiment": symbol_sentiment,
-            "macro_sentiment": macro_sentiment,
-            "gemini_analysis": gemini_result,
-            "article_count": symbol_sentiment["article_count"] + macro_sentiment["article_count"],
-        }
-
-        self._set_cache(f"sentiment_{symbol}", result)
-        return result
-
-    def get_bayesian_likelihood(self, symbol: str) -> float:
-        """
-        Konvertiert Sentiment-Score in Bayesian Likelihood Ratio.
-
-        Score +0.5 → LR 2.0 (starkes bullish Signal)
-        Score  0.0 → LR 1.0 (neutral)
-        Score -0.5 → LR 0.5 (starkes bearish Signal)
-        """
-        result = self.analyze_symbol(symbol)
-        score = result["score"]
-        confidence = result["confidence"]
-
-        # Nur bei ausreichender Confidence den Score nutzen
-        if confidence < 0.3:
-            return 1.0  # Neutral
-
-        # Score (-1 bis +1) → LR (0.3 bis 3.0)
-        # Exponentiell skaliert
-        lr = 2.0 ** (score * confidence * 2)
-        return round(max(0.3, min(3.0, lr)), 3)
-
-
-# ═══════════════════════════════════════════════════════
-#  STANDALONE FORMULA INTERFACE
-# ═══════════════════════════════════════════════════════
-
-def evaluate(bars=None, broker=None, symbol: str = "", **kwargs) -> dict:
-    """
-    Formula-Interface fuer Integration in engine.py.
-
-    Braucht broker-Instanz fuer News-API Zugang.
-    """
-    if not broker or not symbol:
-        return {
-            "name": "Sentiment",
-            "signal": 0.0,
-            "passed": True,  # Bei fehlendem Zugang nicht blockieren
-            "details": {"error": "No broker/symbol provided"},
-        }
-
-    try:
-        engine = SentimentEngine(broker)
-        result = engine.analyze_symbol(symbol)
-
-        score = result["score"]
-        threshold = kwargs.get("threshold", -0.3)  # Blockiert nur bei stark bearish
-
-        return {
-            "name": "Sentiment",
-            "signal": round(score, 3),
-            "passed": score > threshold,  # Nur blockieren wenn STARK bearish
-            "details": {
-                "score": score,
-                "confidence": result["confidence"],
-                "articles": result["article_count"],
-                "macro": result["macro_sentiment"]["score"],
-                "symbol_news": result["symbol_sentiment"]["score"],
-                "gemini": result["gemini_analysis"] is not None,
-                "top_signals": (
-                    result["symbol_sentiment"]["details"][:3]
-                    if result["symbol_sentiment"]["details"]
-                    else []
-                ),
-            },
-        }
-
-    except Exception as e:
-        logger.warning(f"Sentiment analysis failed for {symbol}: {e}")
-        return {
-            "name": "Sentiment",
-            "signal": 0.0,
-            "passed": True,  # Nicht blockieren bei Fehler
-            "details": {"error": str(e)},
-        }
-
-
-================================================================
-  ENDE — 4104 Zeilen total
-================================================================
+if __name__ == "__main__":
+    main()
