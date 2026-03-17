@@ -239,13 +239,10 @@ Antworte NUR mit JSON:
         dynamic = self.discover(market_open)
 
         if not market_open:
-            # Nur Crypto wenn Markt zu
+            # Markt geschlossen — nur Crypto aus Watchlist (kein Fallback auf SIP-Crypto)
             crypto_base = [s for s in Config.WATCHLIST if is_crypto(s)]
             crypto_dynamic = [s for s in dynamic if is_crypto(s)]
-            combined = list(dict.fromkeys(crypto_base + crypto_dynamic))
-            if not combined:
-                combined = ["BTCUSD", "ETHUSD", "SOLUSD"]
-            return combined[:10]
+            return list(dict.fromkeys(crypto_base + crypto_dynamic))[:10]
 
         # Markt offen: Basis + dynamisch, max 15
         combined = list(dict.fromkeys(Config.WATCHLIST + dynamic))
