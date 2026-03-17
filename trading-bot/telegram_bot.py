@@ -407,15 +407,19 @@ class TradingTelegramBot:
 
             try:
                 broker = self.engine.broker
-                if not broker.is_market_open():
-                    time.sleep(60)
-                    continue
+                market_open = broker.is_market_open()
 
-                # Exit checks
+                # Exit checks (immer, auch nachts fuer Crypto-Positionen)
                 self.engine.check_exit_conditions()
 
-                # Scan
-                for symbol in Config.WATCHLIST:
+                # Dynamische Watchlist: Aktien wenn offen, Crypto 24/7
+                active_watchlist = self.engine.watchlist.get_active_watchlist(market_open)
+                logger.info(
+                    f"Scan {'(Markt offen)' if market_open else '(nur Crypto)'}: "
+                    f"{', '.join(active_watchlist)}"
+                )
+
+                for symbol in active_watchlist:
                     if not self.is_running:
                         break
                     try:
@@ -426,7 +430,7 @@ class TradingTelegramBot:
                             self.send_sync(
                                 f"🚨 <b>TRADE SIGNAL</b>\n\n"
                                 f"<b>BUY {signal.qty}x {signal.symbol}</b>\n"
-                                f"Alle 6 Filter bestanden!\n\n"
+                                f"Kaskade: {signal.cascade_label}\n\n"
                                 f"{self._format_signal_text(signal)}"
                             )
                             # Trade ausfuehren
@@ -437,11 +441,16 @@ class TradingTelegramBot:
                                     f"BUY {signal.qty}x {signal.symbol}\n"
                                     f"Order ID: <code>{order_id}</code>"
                                 )
+                            else:
+                                self.send_sync(
+                                    f"⏸ <b>{signal.symbol}: Signal blockiert</b>\n"
+                                    f"GPT-4o oder Risk Manager hat abgelehnt."
+                                )
 
                     except Exception as e:
                         logger.error(f"Scan error {symbol}: {e}")
 
-                # Exit-Alerts
+                # Exit-Alerts fuer laufende Positionen
                 positions = broker.get_positions()
                 for sym, pos in positions.items():
                     plpc = pos["unrealized_plpc"]
@@ -452,7 +461,9 @@ class TradingTelegramBot:
                 logger.error(f"Scan loop error: {e}")
                 self.send_sync(f"⚠️ Scan error: {e}")
 
-            time.sleep(Config.SCAN_INTERVAL)
+            # Kuerzes Intervall nachts (nur Crypto, weniger aktiv)
+            interval = Config.SCAN_INTERVAL if self.engine.broker.is_market_open() else 120
+            time.sleep(interval)
 
         self.send_sync("🔴 Auto-Scan gestoppt.")
         logger.info("Auto-scan thread ended")
