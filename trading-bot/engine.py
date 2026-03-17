@@ -115,38 +115,23 @@ Antworte NUR mit JSON:
 
         try:
             from google.genai import types as genai_types
-            response_schema = {
-                "type": "object",
-                "properties": {
-                    "decision": {"type": "string", "enum": ["BUY", "HOLD"]},
-                    "probability_pct": {"type": "integer"},
-                    "confidence": {"type": "number"},
-                    "reason": {"type": "string"},
-                    "risk_factors": {"type": "array", "items": {"type": "string"}},
-                },
-                "required": ["decision", "probability_pct", "confidence", "reason", "risk_factors"],
-            }
-            response = self.client.models.generate_content(
-                model=self.model,
-                contents=prompt,
-                config=genai_types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=response_schema,
-                    temperature=0.1,
-                    max_output_tokens=200,
-                ),
-            )
-            text = response.text or ""
 
-            # Versuch 1: direktes JSON-Parsing (response_mime_type=application/json)
-            result = None
-            try:
-                result = json.loads(text)
-            except json.JSONDecodeError:
-                pass
+            def _call_gemini(contents):
+                return self.client.models.generate_content(
+                    model=self.model,
+                    contents=contents,
+                    config=genai_types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        temperature=0.1,
+                        max_output_tokens=200,
+                    ),
+                )
 
-            # Versuch 2: äußerstes JSON-Objekt per Klammertiefe extrahieren
-            if not result:
+            def _extract_json(text):
+                try:
+                    return json.loads(text)
+                except json.JSONDecodeError:
+                    pass
                 depth, start = 0, None
                 for i, c in enumerate(text):
                     if c == '{':
@@ -157,13 +142,30 @@ Antworte NUR mit JSON:
                         depth -= 1
                         if depth == 0 and start is not None:
                             try:
-                                result = json.loads(text[start:i + 1])
+                                return json.loads(text[start:i + 1])
                             except json.JSONDecodeError:
                                 pass
                             break
+                return None
+
+            response = _call_gemini(prompt)
+            text = response.text or ""
+            result = _extract_json(text)
+
+            # Versuch 2: Retry mit explizitem JSON-only Prompt
+            if not result:
+                logger.warning(f"[REASONING] {symbol}: Gemini-Antwort nicht parsebar: {text[:300]!r} — Retry...")
+                retry_prompt = (
+                    'Output ONLY raw JSON, no text before or after. Example:\n'
+                    '{"decision":"HOLD","probability_pct":40,"confidence":0.4,"reason":"...","risk_factors":[]}\n\n'
+                    'Now output the JSON for this context:\n' + prompt
+                )
+                response2 = _call_gemini(retry_prompt)
+                text2 = response2.text or ""
+                result = _extract_json(text2)
 
             if not result:
-                logger.warning(f"[REASONING] {symbol}: Gemini-Antwort nicht parsebar: {text[:300]!r}")
+                logger.warning(f"[REASONING] {symbol}: Gemini-Antwort nicht parsebar nach Retry: {text[:300]!r}")
 
             if result:
                 approved = (
