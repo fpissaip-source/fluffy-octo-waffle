@@ -102,10 +102,25 @@ class AlpacaBroker:
         bars.dropna(inplace=True)
         return bars
 
+    def _get_crypto_price(self, symbol: str) -> Optional[float]:
+        """Crypto-Preis via letztem 1-Minuten-Bar (get_latest_crypto_trade nicht verfügbar)."""
+        try:
+            bars = self.api.get_crypto_bars(
+                _alpaca_crypto(symbol),
+                tradeapi.TimeFrame.Minute,
+                start=(datetime.now() - timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                limit=1,
+            ).df
+            if not bars.empty:
+                return float(bars["close"].iloc[-1])
+        except Exception as e:
+            logger.debug(f"Crypto bar fallback failed {symbol}: {e}")
+        return None
+
     def get_latest_price(self, symbol: str) -> Optional[float]:
         try:
             if symbol.upper() in CRYPTO_SYMBOLS:
-                return float(self.api.get_latest_crypto_trade(_alpaca_crypto(symbol)).price)
+                return self._get_crypto_price(symbol)
             return float(self.api.get_latest_trade(symbol).price)
         except Exception as e:
             logger.warning(f"Price failed {symbol}: {e}")
@@ -114,15 +129,16 @@ class AlpacaBroker:
     def get_snapshot(self, symbol: str) -> Optional[dict]:
         try:
             if symbol.upper() in CRYPTO_SYMBOLS:
-                snap = self.api.get_latest_crypto_bar(_alpaca_crypto(symbol))
-                price = float(snap.c)
+                price = self._get_crypto_price(symbol)
+                if price is None:
+                    return None
                 return {
                     "price": price,
                     "bid": price,
                     "ask": price,
                     "spread": 0.0,
-                    "volume": int(snap.v) if snap.v else 0,
-                    "vwap": float(snap.vw) if snap.vw else None,
+                    "volume": 0,
+                    "vwap": None,
                 }
             snap = self.api.get_snapshot(symbol)
             return {

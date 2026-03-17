@@ -44,7 +44,7 @@ class Config:
     LUNARCRUSH_API_KEY: str = os.getenv("LUNARCRUSH_API_KEY", "")
 
     # ── Reasoning Layer Einstellungen ──
-    REASONING_MODEL: str = "gemini-2.0-flash"
+    REASONING_MODEL: str = "gemini-2.5-flash"
     REASONING_MIN_CONFIDENCE: float = 0.65  # Gemini muss mind. 65% sicher sein
     REASONING_TIMEOUT: int = 20
 
