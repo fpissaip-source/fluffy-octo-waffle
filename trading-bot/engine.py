@@ -126,22 +126,33 @@ Antworte NUR mit JSON:
             )
             text = response.text or ""
 
-            # Extrahiere äußerstes JSON-Objekt (unterstützt verschachtelte Strukturen)
+            # Versuch 1: direktes JSON-Parsing (response_mime_type=application/json)
             result = None
-            depth, start = 0, None
-            for i, c in enumerate(text):
-                if c == '{':
-                    if depth == 0:
-                        start = i
-                    depth += 1
-                elif c == '}':
-                    depth -= 1
-                    if depth == 0 and start is not None:
-                        try:
-                            result = json.loads(text[start:i + 1])
-                        except json.JSONDecodeError:
-                            pass
-                        break
+            try:
+                result = json.loads(text)
+            except json.JSONDecodeError:
+                pass
+
+            # Versuch 2: äußerstes JSON-Objekt per Klammertiefe extrahieren
+            if not result:
+                depth, start = 0, None
+                for i, c in enumerate(text):
+                    if c == '{':
+                        if depth == 0:
+                            start = i
+                        depth += 1
+                    elif c == '}':
+                        depth -= 1
+                        if depth == 0 and start is not None:
+                            try:
+                                result = json.loads(text[start:i + 1])
+                            except json.JSONDecodeError:
+                                pass
+                            break
+
+            if not result:
+                logger.warning(f"[REASONING] {symbol}: Gemini-Antwort nicht parsebar: {text[:300]!r}")
+
             if result:
                 approved = (
                     result.get("decision", "HOLD") == "BUY"
