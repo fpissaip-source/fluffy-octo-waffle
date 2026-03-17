@@ -398,6 +398,7 @@ Antworte NUR mit JSON:
                     response_mime_type="application/json",
                     temperature=0.3,
                     max_output_tokens=500,
+                    thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
                 ),
             )
             text = response.text or ""
