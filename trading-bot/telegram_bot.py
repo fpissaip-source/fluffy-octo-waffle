@@ -485,7 +485,7 @@ Antworte NUR mit JSON:
 
     def _scan_loop(self):
         logger.info("Auto-scan thread started")
-        self.send_sync("🤖 Auto-Scan Thread gestartet.")
+        self.send_sync("🤖 Auto-Scan gestartet. SpikeSensor aktiv (300+ Symbole).")
 
         while self.is_running:
             if self.is_paused:
@@ -495,47 +495,42 @@ Antworte NUR mit JSON:
             try:
                 broker = self.engine.broker
                 market_status = broker.get_market_status()
-
-                # Exit checks (immer, auch nachts fuer Crypto-Positionen)
-                self.engine.check_exit_conditions()
-
-                # Dynamische Watchlist: open+extended=Aktien+Crypto, closed=nur Crypto
-                active_watchlist = self.engine.watchlist.get_active_watchlist(market_status)
                 status_labels = {"open": "REGULÄR", "extended": "VOR-/NACHBÖRSE", "closed": "NUR CRYPTO"}
-                logger.info(f"Scan [{status_labels.get(market_status, market_status)}]: {', '.join(active_watchlist)}")
+                logger.info(f"Scan [{status_labels.get(market_status, market_status)}]")
 
-                for symbol in active_watchlist:
-                    if not self.is_running:
-                        break
-                    try:
-                        signal = self.engine.analyze_symbol(symbol)
+                # Spike-Alert BEFORE scan so Telegram gets notified immediately
+                if market_status in ("open", "extended"):
+                    spike_symbols = self.engine.spike_sensor.scan()
+                    if spike_symbols:
+                        self.send_sync(
+                            f"⚡ <b>SPIKE DETECTED</b> — {len(spike_symbols)} Symbole\n"
+                            + "\n".join(f"  • <b>{s}</b>" for s in spike_symbols[:10])
+                            + "\n<i>Vollanalyse läuft...</i>"
+                        )
+                        # Spike-Symbole sofort in die Engine-Watchlist einbauen
+                        for s in spike_symbols:
+                            if s not in self.engine.watchlist.dynamic_symbols:
+                                self.engine.watchlist.dynamic_symbols.append(s)
 
-                        if signal.all_passed:
-                            # Alert senden
+                # Haupt-Scan (Watchlist + Spike-Symbole + Execute)
+                # scan_once übernimmt: exit_checks, watchlist, spike-merge, execute
+                spike_results = self.engine.scan_once(market_status)
+
+                # Trade-Alerts aus Engine trade_log (neue seit letztem Scan)
+                # (Engine sendet keine Telegram-Messages direkt, das macht der Loop hier)
+                for signal in self.engine.trade_log[-5:]:
+                    if signal.all_passed and signal.qty > 0:
+                        # Nur neue (letzten 5 Sekunden) alertieren
+                        age = (datetime.now() - signal.timestamp).total_seconds()
+                        if age < Config.SCAN_INTERVAL + 10:
                             self.send_sync(
                                 f"🚨 <b>TRADE SIGNAL</b>\n\n"
                                 f"<b>BUY {signal.qty}x {signal.symbol}</b>\n"
                                 f"Kaskade: {signal.cascade_label}\n\n"
                                 f"{self._format_signal_text(signal)}"
                             )
-                            # Trade ausfuehren
-                            order_id = self.engine.execute_signal(signal)
-                            if order_id:
-                                self.send_sync(
-                                    f"✅ <b>ORDER EXECUTED</b>\n"
-                                    f"BUY {signal.qty}x {signal.symbol}\n"
-                                    f"Order ID: <code>{order_id}</code>"
-                                )
-                            else:
-                                self.send_sync(
-                                    f"⏸ <b>{signal.symbol}: Signal blockiert</b>\n"
-                                    f"GPT-4o oder Risk Manager hat abgelehnt."
-                                )
 
-                    except Exception as e:
-                        logger.error(f"Scan error {symbol}: {e}")
-
-                # Exit-Alerts fuer laufende Positionen
+                # Stop-Loss Nähe Warnung
                 positions = broker.get_positions()
                 for sym, pos in positions.items():
                     plpc = pos["unrealized_plpc"]

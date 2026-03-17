@@ -29,6 +29,7 @@ from adaptive import AdaptiveLearner
 from formulas import momentum, kelly, ev_gap, kl_divergence, bayesian, stoikov
 from formulas import sentiment as sentiment_formula
 from market_context import MarketContext
+from screener import SpikeSensor
 
 logger = logging.getLogger("bot.engine")
 
@@ -228,7 +229,7 @@ class WatchlistDiscovery:
         from google import genai
         self.client = genai.Client(api_key=Config.GEMINI_API_KEY)
         self.last_update = 0
-        self.update_interval = 3600  # alle 1 Stunde
+        self.update_interval = 900   # alle 15 Minuten (war 1h)
         self.dynamic_symbols: list[str] = []
         logger.info("[WATCHLIST] Dynamic discovery initialisiert")
 
@@ -426,6 +427,7 @@ class Engine:
         self.learner = AdaptiveLearner()
         self.reasoning = ReasoningLayer()
         self.watchlist = WatchlistDiscovery()
+        self.spike_sensor = SpikeSensor(self.broker)
         self.trade_log: list[TradeSignal] = []
         self.position_highs: dict[str, float] = {}
 
@@ -657,8 +659,22 @@ class Engine:
             except Exception as e:
                 logger.error(f"Exit check error {symbol}: {e}")
 
-    def scan_once(self, market_status: str):
+    def scan_once(self, market_status: str) -> list[str]:
+        """
+        Scannt aktive Watchlist + Spike-Sensor Universum.
+        Gibt Liste der erkannten Spike-Symbole zurück (für Telegram-Alerts).
+        """
         active_watchlist = self.watchlist.get_active_watchlist(market_status)
+
+        # Spike-Sensor: breiter Markt (nur wenn Markt offen/extended)
+        spike_symbols: list[str] = []
+        if market_status in ("open", "extended"):
+            spike_symbols = self.spike_sensor.scan()
+            # Spike-Symbole zur Watchlist hinzufügen (keine Duplikate)
+            extra = [s for s in spike_symbols if s not in active_watchlist]
+            if extra:
+                logger.info(f"[SPIKE] {len(extra)} neue Symbole zur Analyse: {', '.join(extra)}")
+            active_watchlist = list(dict.fromkeys(active_watchlist + extra))
 
         logger.info(f"\n{'=' * 60}")
         logger.info(f"  SCAN @ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -682,6 +698,7 @@ class Engine:
         equity = self.broker.get_equity()
         positions = self.broker.get_positions()
         logger.info(f"Equity: ${equity:,.2f}  |  Positions: {len(positions)}  |  Trades: {len(self.trade_log)}")
+        return spike_symbols
 
     def run(self):
         logger.info("=" * 60)
@@ -700,7 +717,7 @@ class Engine:
                     time.sleep(300)
                     continue
 
-                self.scan_once(market_status)
+                self.scan_once(market_status)  # spike_symbols ignoriert in standalone run()
 
             except KeyboardInterrupt:
                 logger.info("\nShutting down...")

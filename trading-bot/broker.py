@@ -215,6 +215,15 @@ class AlpacaBroker:
             logger.error(f"Close failed {symbol}: {e}")
             return None
 
+    def get_snapshots_batch(self, symbols: list) -> dict:
+        """Batch-Snapshot für bis zu 200 Symbole auf einmal (nur US Stocks, kein Crypto)."""
+        try:
+            result = self.api.get_snapshots(symbols, feed="iex")
+            return result if result else {}
+        except Exception as e:
+            logger.warning(f"Batch snapshots failed: {e}")
+            return {}
+
     def is_market_open(self) -> bool:
         return self.api.get_clock().is_open
 

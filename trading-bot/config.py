@@ -45,8 +45,12 @@ class Config:
 
     # ── Reasoning Layer Einstellungen ──
     REASONING_MODEL: str = "gemini-2.5-flash"
-    REASONING_MIN_CONFIDENCE: float = 0.65  # Gemini muss mind. 65% sicher sein
+    REASONING_MIN_CONFIDENCE: float = 0.55  # 55% — weniger restriktiv (war 65%)
     REASONING_TIMEOUT: int = 20
+
+    # ── Spike-Sensor (Echtzeit Markt-Scanner) ──
+    SPIKE_SCAN_INTERVAL: int = 60     # Alle 60s breiten Markt scannen
+    SPIKE_MIN_PCT: float = 0.03       # 3% intraday-Bewegung = Spike
 
     @classmethod
     def is_paper(cls) -> bool:
