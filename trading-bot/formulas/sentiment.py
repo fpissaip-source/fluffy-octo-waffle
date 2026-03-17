@@ -236,12 +236,13 @@ class GeminiAnalyzer:
         self.last_call = 0
         self.min_interval = 60  # Max 1 Call pro Minute
 
-    def analyze(self, headlines: list[str], symbol: str) -> Optional[dict]:
+    def analyze(self, articles: list[dict], symbol: str) -> Optional[dict]:
         """
         Fragt Gemini nach einer Einschaetzung.
-        Gibt Score (-1 bis +1) und Begruendung zurueck.
+        Bekommt vollständige Artikel-Daten (Headline + Datum) für Trend-Erkennung.
+        Gibt Score (-1 bis +1), Confidence und Begründung zurück.
         """
-        if not headlines:
+        if not articles:
             return None
 
         # Rate limiting
@@ -255,14 +256,35 @@ class GeminiAnalyzer:
             import json
 
             client = genai.Client(api_key=self.api_key)
-            news_text = "\n".join(f"- {h}" for h in headlines[:10])
+
+            # Top N Headlines mit Datum (für narrative Trends über mehrere Tage)
+            top_articles = articles[:Config.SENTIMENT_GEMINI_HEADLINES]
+            news_text = "\n".join(
+                f"- [{a.get('created_at', '')[:10]}] {a['headline']}"
+                for a in top_articles
+            )
 
             prompt = (
-                f"Analyze these headlines for {symbol} stock sentiment.\n\n"
+                f"You are analyzing multi-day news flow for {symbol} stock.\n"
+                f"News from the last {Config.NEWS_LOOKBACK_HOURS}h (newest first):\n\n"
                 f"{news_text}\n\n"
-                f"Respond ONLY with JSON:\n"
-                f'{{"score": <-1.0 to 1.0>, "confidence": <0 to 1>, '
-                f'"reason": "<one sentence>"}}'
+                f"Identify the NARRATIVE TREND across all articles:\n"
+                f"- Is sentiment improving, worsening, or stable over time?\n"
+                f"- Are there fundamental catalysts (earnings, FDA, M&A, macro) that suggest a multi-day move?\n"
+                f"- Score: +1.0 = strong bullish catalyst, 0.0 = neutral, -1.0 = strong bearish catalyst"
+            )
+
+            # Structured Output — kein JSON-Parsing nötig
+            response_schema = genai_types.Schema(
+                type=genai_types.Type.OBJECT,
+                properties={
+                    "score":      genai_types.Schema(type=genai_types.Type.NUMBER),
+                    "confidence": genai_types.Schema(type=genai_types.Type.NUMBER),
+                    "trend":      genai_types.Schema(type=genai_types.Type.STRING,
+                                                     enum=["improving", "stable", "worsening"]),
+                    "reason":     genai_types.Schema(type=genai_types.Type.STRING),
+                },
+                required=["score", "confidence", "trend", "reason"],
             )
 
             response = client.models.generate_content(
@@ -270,20 +292,20 @@ class GeminiAnalyzer:
                 contents=prompt,
                 config=genai_types.GenerateContentConfig(
                     response_mime_type="application/json",
+                    response_schema=response_schema,
                     max_output_tokens=300,
                     thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
                 ),
             )
 
             self.last_call = time.time()
-            text = response.text or ""
-            match = re.search(r'\{[^}]+\}', text)
-            if match:
-                result = json.loads(match.group())
-                logger.info(f"Gemini analysis {symbol}: score={result.get('score')} "
-                            f"reason={result.get('reason', '')[:60]}")
-                return result
-            return None
+            result = json.loads(response.text or "{}")
+            if result:
+                logger.info(
+                    f"Gemini sentiment {symbol}: score={result.get('score'):.2f} "
+                    f"trend={result.get('trend')} | {result.get('reason', '')[:80]}"
+                )
+            return result if result else None
 
         except Exception as e:
             logger.warning(f"Gemini analysis failed: {e}")
@@ -309,9 +331,10 @@ class SentimentEngine:
         self.scorer = KeywordScorer()
         self.gemini = GeminiAnalyzer()
 
-        # Cache um API-Calls zu reduzieren
+        # Cache — für Swing Trading auf 15 Minuten erhöht
+        # (News-Lage ändert sich nicht im Minutentakt)
         self._cache: dict = {}
-        self._cache_ttl = 300  # 5 Minuten Cache
+        self._cache_ttl = 900  # 15 Minuten Cache
 
     def _is_cached(self, key: str) -> bool:
         if key in self._cache:
@@ -342,19 +365,23 @@ class SentimentEngine:
         if cached:
             return cached
 
-        # ── 1. Symbol-spezifische News ──
-        articles = self.news_fetcher.get_news(symbol, limit=10, hours_back=12)
+        # ── 1. Symbol-spezifische News (erweiterter Horizont für Swing-Kontext) ──
+        articles = self.news_fetcher.get_news(
+            symbol,
+            limit=Config.NEWS_MAX_ARTICLES,
+            hours_back=Config.NEWS_LOOKBACK_HOURS,
+        )
         symbol_sentiment = self.scorer.score_articles(articles)
 
         # ── 2. Makro-News ──
-        macro_articles = self.news_fetcher.get_market_news(limit=10)
+        macro_articles = self.news_fetcher.get_market_news(limit=15)
         macro_sentiment = self.scorer.score_articles(macro_articles, is_macro=True)
 
-        # ── 3. Gemini (nur wenn Score unklar oder extreme News) ──
+        # ── 3. Gemini Trend-Analyse (Top 25 Headlines mit Datum) ──
+        # Läuft immer wenn Artikel vorhanden (nicht nur bei extremem Score)
         gemini_result = None
-        headlines = [a["headline"] for a in articles]
-        if headlines and abs(symbol_sentiment["score"]) > 0.3:
-            gemini_result = self.gemini.analyze(headlines, symbol)
+        if articles:
+            gemini_result = self.gemini.analyze(articles, symbol)
 
         # ── Kombination ──
         # Gewichtung: Symbol-News 50%, Makro 30%, Gemini 20%
@@ -368,12 +395,15 @@ class SentimentEngine:
         confidence = 0.3  # Baseline
         if symbol_sentiment["article_count"] > 3:
             confidence += 0.2
-        if symbol_sentiment["article_count"] > 7:
+        if symbol_sentiment["article_count"] > 10:
             confidence += 0.1
         if macro_sentiment["article_count"] > 3:
             confidence += 0.1
         if gemini_result:
             confidence += 0.2
+            # Klarer Trend = höhere Confidence
+            if gemini_result.get("trend") in ("improving", "worsening"):
+                confidence += 0.1
         confidence = min(confidence, 1.0)
 
         result = {
@@ -446,6 +476,7 @@ def evaluate(bars=None, broker=None, symbol: str = "", **kwargs) -> dict:
                 "macro": result["macro_sentiment"]["score"],
                 "symbol_news": result["symbol_sentiment"]["score"],
                 "gemini": result["gemini_analysis"] is not None,
+                "gemini_trend": result["gemini_analysis"].get("trend") if result["gemini_analysis"] else None,
                 "top_signals": (
                     result["symbol_sentiment"]["details"][:3]
                     if result["symbol_sentiment"]["details"]

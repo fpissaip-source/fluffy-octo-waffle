@@ -560,7 +560,7 @@ class Engine:
     def analyze_symbol(self, symbol: str) -> TradeSignal:
         signal = TradeSignal(symbol)
 
-        bars = self.broker.get_bars(symbol, timeframe="5Min", limit=Config.LOOKBACK_BARS)
+        bars = self.broker.get_bars(symbol, timeframe=Config.TRADING_TIMEFRAME, limit=Config.LOOKBACK_BARS)
         if bars.empty or len(bars) < 50:
             logger.warning(f"{symbol}: Not enough data ({len(bars) if not bars.empty else 0} bars)")
             signal.reason = "Insufficient data"
@@ -797,7 +797,7 @@ class Engine:
 
         for symbol, pos in positions.items():
             try:
-                bars = self.broker.get_bars(symbol, timeframe="5Min", limit=50)
+                bars = self.broker.get_bars(symbol, timeframe=Config.TRADING_TIMEFRAME, limit=50)
                 if bars.empty:
                     continue
 

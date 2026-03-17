@@ -31,6 +31,16 @@ class Config:
     SHORT_WINDOW: int = 10
     LONG_WINDOW: int = 30
 
+    # ── Chart-Timeframe (Daytrading: "5Min" / Swing: "1Hour") ──
+    # Bestimmt: Kerzenbreite für alle Formeln, ATR-Weite der Stops,
+    # Gleitende Durchschnitte, EV-Gap, Momentum — alles skaliert mit.
+    TRADING_TIMEFRAME: str = os.getenv("TRADING_TIMEFRAME", "1Hour")
+
+    # ── News / Sentiment Horizont ──
+    NEWS_LOOKBACK_HOURS: int = int(os.getenv("NEWS_LOOKBACK_HOURS", "72"))   # 3 Tage für Swing-Kontext
+    NEWS_MAX_ARTICLES:   int = int(os.getenv("NEWS_MAX_ARTICLES",   "30"))   # Mehr Artikel = breiteres Bild
+    SENTIMENT_GEMINI_HEADLINES: int = 25                                      # Gemini bekommt Top 25 Headlines
+
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 
     # ── Telegram ──
