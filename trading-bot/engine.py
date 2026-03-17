@@ -310,7 +310,7 @@ class WatchlistDiscovery:
     def discover(self, market_status: str) -> list[str]:
         """
         Invertierte Logik: Alpaca liefert Top-50 (echte Daten),
-        Gemini waehlt daraus die 8 besten basierend auf News/Katalysatoren.
+        Gemini waehlt daraus die 15 besten basierend auf News/Katalysatoren.
         Kein Halluzinieren — nur Ticker die wirklich handeln.
         """
         if not self.should_update():
@@ -341,7 +341,7 @@ class WatchlistDiscovery:
 Hier sind die 50 aktivsten US-Aktien der letzten Stunde nach Volumen und Kurs-Bewegung (echte Alpaca-Daten):
 {candidates_str}
 
-Wähle die 8 besten aus DIESER LISTE basierend auf deinem Wissen über:
+Wähle die 15 besten aus DIESER LISTE basierend auf deinem Wissen über:
 - Aktuelle News und Katalysatoren (Earnings, FDA, M&A, Short Squeeze)
 - Momentum und Trendstärke
 - Liquidität und Handelbarkeit
@@ -349,7 +349,7 @@ Wähle die 8 besten aus DIESER LISTE basierend auf deinem Wissen über:
 WICHTIG: Nur Symbole aus der obigen Liste verwenden — keine anderen erfinden.
 
 Antworte NUR mit JSON:
-{{"symbols": ["SYM1", "SYM2", "SYM3", "SYM4", "SYM5", "SYM6", "SYM7", "SYM8"], "reasoning": "ein Satz"}}"""
+{{"symbols": ["SYM1","SYM2","SYM3","SYM4","SYM5","SYM6","SYM7","SYM8","SYM9","SYM10","SYM11","SYM12","SYM13","SYM14","SYM15"], "reasoning": "ein Satz"}}"""
 
         try:
             from google.genai import types as genai_types
@@ -387,7 +387,7 @@ Antworte NUR mit JSON:
                 hallucinated = [s for s in raw_symbols if s not in candidate_set]
                 if hallucinated:
                     logger.warning(f"[WATCHLIST] Gemini halluzinierte {len(hallucinated)} Symbole → verworfen: {hallucinated}")
-                self.dynamic_symbols = validated[:8]
+                self.dynamic_symbols = validated[:15]
                 self.last_update = time.time()
                 logger.info(f"[WATCHLIST] Neue Symbole ({len(self.dynamic_symbols)}): {self.dynamic_symbols} | {result.get('reasoning', '')}")
                 return self.dynamic_symbols
@@ -416,7 +416,7 @@ Antworte NUR mit JSON:
 
         # open + extended: volles Universum
         combined = list(dict.fromkeys(Config.WATCHLIST + dynamic))
-        return combined[:15]
+        return combined[:25]
 
 
 class TradeSignal:
