@@ -164,6 +164,10 @@ class SpikeSensor:
                 vol_mult = volume / avg_vol if avg_vol > 0 else 1.0
                 self._avg_volumes[symbol] = avg_vol * 0.9 + volume * 0.1
 
+                # Penny-Stocks filtern
+                if close < 2.0 or volume < 100_000:
+                    return
+
                 is_spike = abs(pct_move) >= self.min_pct or vol_mult >= self.min_vol_mult
 
                 if is_spike:
@@ -205,6 +209,9 @@ class SpikeSensor:
                     close_p = float(daily.close)
                     volume = int(daily.volume)
                     if open_p <= 0 or close_p <= 0:
+                        continue
+                    # Penny-Stocks filtern: unter $2 oder unter 100k Volumen → kein IEX-Daten
+                    if close_p < 2.0 or volume < 100_000:
                         continue
                     pct_move = (close_p - open_p) / open_p
                     avg_vol = self._avg_volumes.get(symbol, volume)
