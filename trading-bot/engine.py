@@ -165,74 +165,92 @@ Wenn die System-Lernmuster aehnliche Muster als problematisch markieren, sei kon
 Antworte NUR mit JSON:
 {{"decision": "BUY" oder "HOLD", "probability_pct": 0-100, "confidence": 0.0-1.0, "reason": "ein Satz auf Deutsch", "risk_factors": ["Faktor1", "Faktor2"]}}"""
 
-        def _do_call() -> dict:
-            try:
-                from google.genai import types as genai_types
+        def _gemini_call(prompt_text: str) -> dict:
+            """Einzelner Gemini-API-Call mit Schema. Wirft Exception bei Fehler."""
+            from google.genai import types as genai_types
 
-                # ── Structured Output Schema — kein JSON-Parsing nötig ──
-                response_schema = genai_types.Schema(
-                    type=genai_types.Type.OBJECT,
-                    properties={
-                        "decision":        genai_types.Schema(type=genai_types.Type.STRING, enum=["BUY", "HOLD"]),
-                        "probability_pct": genai_types.Schema(type=genai_types.Type.INTEGER),
-                        "confidence":      genai_types.Schema(type=genai_types.Type.NUMBER),
-                        "reason":          genai_types.Schema(type=genai_types.Type.STRING),
-                        "risk_factors":    genai_types.Schema(
-                            type=genai_types.Type.ARRAY,
-                            items=genai_types.Schema(type=genai_types.Type.STRING),
-                        ),
-                    },
-                    required=["decision", "probability_pct", "confidence", "reason", "risk_factors"],
-                )
-
-                response = self.client.models.generate_content(
-                    model=self.model,
-                    contents=prompt,
-                    config=genai_types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        response_schema=response_schema,
-                        temperature=0.1,
-                        max_output_tokens=300,
-                        thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
+            response_schema = genai_types.Schema(
+                type=genai_types.Type.OBJECT,
+                properties={
+                    "decision":        genai_types.Schema(type=genai_types.Type.STRING, enum=["BUY", "HOLD"]),
+                    "probability_pct": genai_types.Schema(type=genai_types.Type.INTEGER),
+                    "confidence":      genai_types.Schema(type=genai_types.Type.NUMBER),
+                    "reason":          genai_types.Schema(type=genai_types.Type.STRING),
+                    "risk_factors":    genai_types.Schema(
+                        type=genai_types.Type.ARRAY,
+                        items=genai_types.Schema(type=genai_types.Type.STRING),
                     ),
-                )
+                },
+                required=["decision", "probability_pct", "confidence", "reason", "risk_factors"],
+            )
 
-                raw_text = response.text or ""
-                result = json.loads(raw_text)
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=prompt_text,
+                config=genai_types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=response_schema,
+                    temperature=0.1,
+                    max_output_tokens=800,
+                    thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
+                ),
+            )
 
-                approved = (
-                    result.get("decision", "HOLD") == "BUY"
-                    and float(result.get("confidence", 0)) >= self.min_confidence
-                )
-                prob_pct = int(result.get("probability_pct", round(float(result.get("confidence", 0)) * 100)))
-                logger.info(
-                    f"[REASONING] {symbol}: {result.get('decision')} "
-                    f"Wahrscheinlichkeit={prob_pct}% | {result.get('reason', '')}"
-                )
-                return {
-                    "approved": approved,
-                    "confidence": float(result.get("confidence", 0)),
-                    "probability_pct": prob_pct,
-                    "reason": result.get("reason", ""),
-                    "risk_factors": result.get("risk_factors", []),
-                    "raw": result,
-                    "prompt": prompt,
-                    "raw_response": raw_text,
-                }
+            raw_text = response.text or ""
+            result = json.loads(raw_text)  # Wirft bei truncated JSON eine Exception
 
+            approved = (
+                result.get("decision", "HOLD") == "BUY"
+                and float(result.get("confidence", 0)) >= self.min_confidence
+            )
+            prob_pct = int(result.get("probability_pct", round(float(result.get("confidence", 0)) * 100)))
+            logger.info(
+                f"[REASONING] {symbol}: {result.get('decision')} "
+                f"Wahrscheinlichkeit={prob_pct}% | {result.get('reason', '')}"
+            )
+            return {
+                "approved": approved,
+                "confidence": float(result.get("confidence", 0)),
+                "probability_pct": prob_pct,
+                "reason": result.get("reason", ""),
+                "risk_factors": result.get("risk_factors", []),
+                "raw": result,
+                "prompt": prompt_text,
+                "raw_response": raw_text,
+            }
+
+        def _do_call() -> dict:
+            # ── Versuch 1: Vollständiger Prompt ──
+            try:
+                return _gemini_call(prompt)
             except Exception as e:
-                logger.error(f"[REASONING] {symbol}: Gemini Fehler: {e}")
-                return {"approved": False, "confidence": 0.0, "reason": f"API error: {e}",
-                        "risk_factors": [], "raw": {}, "prompt": prompt, "raw_response": str(e)}
+                logger.warning(f"[REASONING] {symbol}: Versuch 1 fehlgeschlagen ({e}) — Retry mit kuerzem Prompt")
 
-        # ── 5-Sekunden Timeout — blockiert nicht bei hängendem Gemini ──
+            # ── Versuch 2: Kürzerer Prompt ohne Learning-Summary und Marktkontext ──
+            short_prompt = (
+                f"Trading-Signal fuer {symbol} @ ${price:.2f}. Depot: ${equity:,.2f}.\n"
+                f"Regime: {regime} | Kaskade: {signal.cascade_label}\n"
+                f"Filter: {', '.join(f'{n}:PASS' if r['passed'] else f'{n}:FAIL' for n, r in signal.results.items())}\n\n"
+                f"Entscheide: BUY oder HOLD?\n"
+                f"Antworte NUR mit JSON:\n"
+                f'{{"decision":"BUY" oder "HOLD","probability_pct":0-100,"confidence":0.0-1.0,"reason":"ein Satz auf Deutsch","risk_factors":[]}}'
+            )
+            try:
+                result = _gemini_call(short_prompt)
+                result["prompt"] = prompt  # Original-Prompt fuer Autopsy erhalten
+                return result
+            except Exception as e2:
+                logger.error(f"[REASONING] {symbol}: Beide Versuche fehlgeschlagen: {e2}")
+                raise e2
+
+        # ── 15-Sekunden Timeout (2 Versuche a ~6s) ──
         from concurrent.futures import TimeoutError as FuturesTimeoutError
         with ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(_do_call)
             try:
-                return future.result(timeout=5)
+                return future.result(timeout=15)
             except FuturesTimeoutError:
-                return self._cascade_fallback(symbol, signal.cascade_level, "Gemini-Timeout (5s)")
+                return self._cascade_fallback(symbol, signal.cascade_level, "Gemini-Timeout (15s)")
             except Exception as e:
                 return self._cascade_fallback(symbol, signal.cascade_level, f"Gemini-Exception: {e}")
 
