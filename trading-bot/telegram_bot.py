@@ -317,10 +317,11 @@ class TradingTelegramBot:
     async def cmd_erklaer(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Erklaert: letzter Trade, letzte 2 Versuche, aktuelles Regime + Grund."""
         import json
+        import numpy as np
         from pathlib import Path
         from adaptive import AUTOPSY_DIR, TRADE_LOG_FILE, TradeRecord
 
-        lines = ["<b>ERKLAERUNG — WAS MACHT DER BOT?</b>\n━━━━━━━━━━━━━━━━━━━━━━\n"]
+        await update.message.reply_text("Analysiere...")
 
         # ── 1. LETZTER AUSGEFUEHRTER TRADE ──────────────────
         try:
@@ -336,27 +337,29 @@ class TradingTelegramBot:
                 exit_t = last.exit_time[:16].replace("T", " ") if last.exit_time else "noch offen"
                 pnl_str = f"{last.pnl_pct:+.1%} (${last.pnl:+.2f})" if last.exit_price else "noch offen"
 
-                # Formel-Scores des letzten Trades
                 formula_lines = []
                 for name, score in (last.formula_scores or {}).items():
                     icon = "✅" if score > 0.5 else "❌"
-                    formula_lines.append(f"    {icon} {name}: {score:.2f}")
-                formulas_text = "\n".join(formula_lines) or "    keine Daten"
+                    formula_lines.append(f"  {icon} {name}: {score:.2f}")
+                formulas_text = "\n".join(formula_lines) or "  keine Daten"
 
-                lines.append(
+                msg1 = (
                     f"<b>1. LETZTER TRADE</b>\n"
-                    f"  Symbol:  <b>{last.symbol}</b>\n"
-                    f"  Einstieg: ${last.entry_price:.2f} um {entry_t}\n"
-                    f"  Regime:   {last.regime}\n"
-                    f"  P/L:      {pnl_str}\n"
-                    f"  Ausstieg: {last.exit_reason or exit_t}\n"
-                    f"  Sentiment: {last.sentiment_score:+.2f}\n"
-                    f"  Filter:\n{formulas_text}\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"Symbol:    <b>{last.symbol}</b>\n"
+                    f"Einstieg:  ${last.entry_price:.2f} um {entry_t}\n"
+                    f"Regime:    {last.regime}\n"
+                    f"P/L:       {pnl_str}\n"
+                    f"Ausstieg:  {last.exit_reason or exit_t}\n"
+                    f"Sentiment: {last.sentiment_score:+.2f}\n"
+                    f"Filter:\n{formulas_text}"
                 )
             else:
-                lines.append("<b>1. LETZTER TRADE</b>\n  Noch keine Trade-History.\n")
+                msg1 = "<b>1. LETZTER TRADE</b>\n━━━━━━━━━━━━━━━━━━━━━━\nNoch keine Trade-History."
         except Exception as e:
-            lines.append(f"<b>1. LETZTER TRADE</b>\n  Fehler: {e}\n")
+            msg1 = f"<b>1. LETZTER TRADE</b>\nFehler: {e}"
+
+        await update.message.reply_text(msg1, parse_mode="HTML")
 
         # ── 2. LETZTE 2 TRADE-VERSUCHE (AUTOPSY) ────────────
         try:
@@ -367,45 +370,47 @@ class TradingTelegramBot:
             )[:2]
 
             if autopsy_files:
-                lines.append("<b>2. LETZTE 2 TRADE-VERSUCHE</b>")
+                parts = ["<b>2. LETZTE 2 TRADE-VERSUCHE</b>\n━━━━━━━━━━━━━━━━━━━━━━"]
                 for i, af in enumerate(autopsy_files, 1):
                     with open(af) as f:
                         a = json.load(f)
 
-                    ts = a.get("timestamp", "?")[:16].replace("T", " ")
+                    ts = str(a.get("timestamp", "?"))[:16].replace("T", " ")
                     sym = a.get("symbol", "?")
                     approved = a.get("gemini_approved", False)
                     prob = a.get("gemini_probability_pct", "?")
-                    reason = a.get("gemini_reason", "?")
+                    reason = str(a.get("gemini_reason", "?"))[:120]
                     regime = a.get("regime", "?")
                     cascade = a.get("cascade_level", "?")
                     risk_factors = a.get("gemini_risk_factors", [])
                     price = a.get("price", 0)
                     vix = a.get("vix")
 
-                    # Welche Filter bestanden / gefailt
                     formulas = a.get("formula_results", {})
                     passed = [n for n, r in formulas.items() if r.get("passed")]
                     failed = [n for n, r in formulas.items() if not r.get("passed")]
 
                     decision_icon = "✅ AUSGEFUEHRT" if approved else "🚫 ABGELEHNT"
                     rf_text = ", ".join(risk_factors) if risk_factors else "keine"
+                    vix_text = f" | VIX: {vix:.1f}" if vix else ""
 
-                    lines.append(
-                        f"\n  <b>#{i}: {sym}</b> @ ${price:.2f} — {ts}\n"
-                        f"  Entscheidung: {decision_icon}\n"
-                        f"  Wahrscheinlichkeit: {prob}%\n"
-                        f"  Kaskade: {cascade}/7  |  Regime: {regime}"
-                        + (f"  |  VIX: {vix:.1f}" if vix else "") + "\n"
-                        f"  Grund: <i>{reason}</i>\n"
-                        f"  ✅ Bestanden: {', '.join(passed) or 'keine'}\n"
-                        f"  ❌ Gefailt:   {', '.join(failed) or 'keine'}\n"
-                        f"  Risikofaktoren: {rf_text}"
+                    parts.append(
+                        f"\n<b>#{i}: {sym}</b> @ ${price:.2f} — {ts}\n"
+                        f"Entscheidung: {decision_icon}\n"
+                        f"Wahrsch.: {prob}%  |  Kaskade: {cascade}/7\n"
+                        f"Regime: {regime}{vix_text}\n"
+                        f"Grund: {reason}\n"
+                        f"✅ {', '.join(passed) or 'keine'}\n"
+                        f"❌ {', '.join(failed) or 'keine'}\n"
+                        f"Risiko: {rf_text}"
                     )
+                msg2 = "\n".join(parts)
             else:
-                lines.append("<b>2. LETZTE 2 TRADE-VERSUCHE</b>\n  Noch keine Autopsy-Daten.")
+                msg2 = "<b>2. LETZTE 2 TRADE-VERSUCHE</b>\n━━━━━━━━━━━━━━━━━━━━━━\nNoch keine Autopsy-Daten."
         except Exception as e:
-            lines.append(f"<b>2. LETZTE 2 TRADE-VERSUCHE</b>\n  Fehler: {e}")
+            msg2 = f"<b>2. LETZTE 2 TRADE-VERSUCHE</b>\nFehler: {e}"
+
+        await update.message.reply_text(msg2, parse_mode="HTML")
 
         # ── 3. AKTUELLES REGIME + BEGRUENDUNG ───────────────
         try:
@@ -417,41 +422,32 @@ class TradingTelegramBot:
             regime_icons = {"CALM": "😎", "NORMAL": "📊", "VOLATILE": "⚡", "CRISIS": "🚨"}
             icon = regime_icons.get(risk.regime.value, "📊")
 
-            # Berechne die konkreten Messwerte die das Regime ausgeloest haben
-            import numpy as np
             spy_close = bars["close"]
             returns = spy_close.pct_change().dropna()
-            realized_vol = returns.tail(20).std() * np.sqrt(252)
-            recent_high = spy_close.tail(20).max()
-            current = spy_close.iloc[-1]
+            realized_vol = float(returns.tail(20).std() * np.sqrt(252))
+            recent_high = float(spy_close.tail(20).max())
+            current = float(spy_close.iloc[-1])
             drawdown = (current - recent_high) / recent_high
-
-            regime_thresholds = {
-                "CALM":     "Vol < 15%  |  Drawdown < 5%",
-                "NORMAL":   "Vol 15-30%  |  Drawdown 5-8%",
-                "VOLATILE": "Vol 30-50%  |  Drawdown 5-8%",
-                "CRISIS":   "Vol > 50%  ODER  Drawdown > 8%",
-            }
-            threshold = regime_thresholds.get(risk.regime.value, "?")
             p = risk.params
 
-            lines.append(
-                f"\n<b>3. MARKT-REGIME: {icon} {risk.regime.value}</b>\n"
-                f"  {p['description']}\n\n"
-                f"  <b>Warum {risk.regime.value}?</b>\n"
-                f"  Realisierte Volatilitaet (SPY, 20 Bars): <b>{realized_vol:.1%}</b>\n"
-                f"  Drawdown vom 20-Bar-Hoch:               <b>{drawdown:+.1%}</b>\n"
-                f"  Schwelle fuer dieses Regime: {threshold}\n\n"
-                f"  <b>Konsequenzen:</b>\n"
-                f"  Max Positionen: {p['max_open_positions']}\n"
-                f"  Max Positionsgr.: {p['max_position_pct']:.0%} des Depots\n"
-                f"  Stop-Loss: {p['stop_loss_atr_mult']}x ATR  |  TP: {p['take_profit_atr_mult']}x ATR\n"
-                f"  Kelly-Faktor: {p['kelly_mult']}"
+            msg3 = (
+                f"<b>3. MARKT-REGIME: {icon} {risk.regime.value}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"{p['description']}\n\n"
+                f"<b>Warum {risk.regime.value}?</b>\n"
+                f"SPY Volatilitaet (20 Bars): <b>{realized_vol:.1%}</b>\n"
+                f"Drawdown vom Hoch:          <b>{drawdown:+.1%}</b>\n\n"
+                f"<b>Konsequenzen:</b>\n"
+                f"Max Positionen: {p['max_open_positions']}\n"
+                f"Max Groesse:    {p['max_position_pct']:.0%} des Depots\n"
+                f"Stop-Loss:      {p['stop_loss_atr_mult']}x ATR\n"
+                f"Take-Profit:    {p['take_profit_atr_mult']}x ATR\n"
+                f"Kelly-Faktor:   {p['kelly_mult']}"
             )
         except Exception as e:
-            lines.append(f"\n<b>3. MARKT-REGIME</b>\n  Fehler: {e}")
+            msg3 = f"<b>3. MARKT-REGIME</b>\nFehler: {e}"
 
-        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+        await update.message.reply_text(msg3, parse_mode="HTML")
 
     async def cmd_regime(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Zeigt aktuelles Markt-Regime und Risk-Parameter."""
