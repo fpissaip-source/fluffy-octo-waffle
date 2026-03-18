@@ -327,6 +327,36 @@ class TradingTelegramBot:
         except Exception as e:
             await update.message.reply_text(f"Error: {e}")
 
+    async def cmd_cancelbuy(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Cancelt alle offenen BUY-Orders (keine Positionen, nur pending orders)."""
+        try:
+            broker = AlpacaBroker()
+            orders = broker.api.list_orders(status="open")
+            buy_orders = [o for o in orders if o.side == "buy"]
+
+            if not buy_orders:
+                await update.message.reply_text("Keine offenen BUY-Orders vorhanden.")
+                return
+
+            cancelled = []
+            failed = []
+            for o in buy_orders:
+                try:
+                    broker.api.cancel_order(o.id)
+                    cancelled.append(f"{o.symbol} ({o.qty}x)")
+                except Exception as e:
+                    failed.append(f"{o.symbol}: {e}")
+
+            lines = [f"<b>🗑 BUY-Orders gecancelt</b>", "━━━━━━━━━━━━━━━━━━━━━━"]
+            if cancelled:
+                lines.append("✅ " + "\n✅ ".join(cancelled))
+            if failed:
+                lines.append("❌ " + "\n❌ ".join(failed))
+            lines.append(f"\nBot kann bei nächstem Scan neu setzen.")
+            await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+        except Exception as e:
+            await update.message.reply_text(f"Error: {e}")
+
     async def cmd_erklaer(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Erklaert: letzter Trade, letzte 2 Versuche, aktuelles Regime + Grund."""
         import json
@@ -902,6 +932,7 @@ Antworte NUR mit JSON:
         self.app.add_handler(CommandHandler("test", self.cmd_test))
         self.app.add_handler(CommandHandler("stoplosses", self.cmd_stoplosses))
         self.app.add_handler(CommandHandler("orders", self.cmd_orders))
+        self.app.add_handler(CommandHandler("cancelbuy", self.cmd_cancelbuy))
 
         logger.info("Telegram bot running. Send /start to begin.")
         self.app.run_polling(drop_pending_updates=True)
