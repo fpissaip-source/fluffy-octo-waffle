@@ -16,6 +16,7 @@ Aus dem PDF "Der perfekte AI Trading Bot":
 """
 
 import logging
+import time
 from datetime import datetime
 from enum import Enum
 from typing import Optional
@@ -166,11 +167,18 @@ class RiskManager:
         self.daily_loss_limit = 0.05     # 5% Tagesverlust → Stop
         self.start_of_day_equity = 0.0
         self.kill_switch_active = False
+        self._regime_last_update: float = 0
+        self._regime_cache_ttl: int = 300  # Regime max alle 5 Minuten updaten
 
     # ── Regime Update ──────────────────────────────────
 
-    def update_regime(self, bars: pd.DataFrame, vix_level: Optional[float] = None):
-        """Aktualisiert das Markt-Regime."""
+    def update_regime(self, bars: pd.DataFrame, vix_level: Optional[float] = None, force: bool = False):
+        """Aktualisiert das Markt-Regime — max alle 5 Minuten (global, nicht per Symbol)."""
+        now = time.time()
+        if not force and (now - self._regime_last_update) < self._regime_cache_ttl:
+            return  # Noch frisch — kein Update
+        self._regime_last_update = now
+
         old = self.regime
         self.regime = detect_regime(bars, vix_level)
         self.params = REGIME_PARAMS[self.regime]

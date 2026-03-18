@@ -705,6 +705,10 @@ class Engine:
         self._async_threads: list[threading.Thread] = []
         self._exit_lock = threading.Lock()
         self._stop_event = threading.Event()
+        # Schutz gegen Doppel-Close und Doppel-Buy
+        self._closing_positions: set[str] = set()  # Symbole mit laufendem Close-Order
+        self._pending_buys: set[str] = set()        # Symbole mit laufendem Buy-Order
+        self._order_lock = threading.Lock()
         # Telegram-Callback (optional): wird von TradingTelegramBot gesetzt
         self.notify: Optional[callable] = None
 
@@ -921,9 +925,19 @@ class Engine:
         if signal.qty <= 0:
             logger.warning(f"{signal.symbol}: All passed but qty=0")
             return None
-        if self.broker.has_position(signal.symbol):
-            logger.info(f"{signal.symbol}: Already have position, skipping")
-            return None
+
+        # Kein doppelter Buy wenn bereits eine Order oder Position laeuft
+        with self._order_lock:
+            if signal.symbol in self._pending_buys:
+                logger.info(f"{signal.symbol}: Buy bereits laufend, skip")
+                return None
+            if signal.symbol in self._closing_positions:
+                logger.info(f"{signal.symbol}: Close laufend, kein Buy")
+                return None
+            if self.broker.has_position(signal.symbol):
+                logger.info(f"{signal.symbol}: Already have position, skipping")
+                return None
+            self._pending_buys.add(signal.symbol)
 
         # Risk Manager checks
         positions = self.broker.get_positions()
@@ -1020,6 +1034,10 @@ class Engine:
         else:
             # Market-Order: Stoikov nicht relevant (Extended Hours haben eigene Limit-Logik in broker)
             order_id = self.broker.market_buy(signal.symbol, signal.qty)
+        # Buy abgeschlossen (egal ob Erfolg oder Fehler) — aus pending entfernen
+        with self._order_lock:
+            self._pending_buys.discard(signal.symbol)
+
         if order_id:
             signal.reason += f" -> Order {order_id}"
             self.trade_log.append(signal)
@@ -1086,21 +1104,33 @@ class Engine:
         positions = self.broker.get_positions()
         equity = self.broker.get_equity()
 
+        # Symbole die nicht mehr in Positionen sind aus _closing_positions entfernen
+        with self._order_lock:
+            self._closing_positions -= set(self._closing_positions) - set(positions.keys())
+
         # Kill-Switch Check
         if self.risk.check_kill_switch(equity):
             logger.critical("KILL SWITCH ACTIVE — closing ALL positions")
             for symbol in positions:
-                self.broker.close_position(symbol)
+                with self._order_lock:
+                    if symbol not in self._closing_positions:
+                        self._closing_positions.add(symbol)
+                        self.broker.close_position(symbol)
             return
 
         for symbol, pos in positions.items():
             try:
+                # Kein doppelter Close wenn bereits eine Order laeuft
+                with self._order_lock:
+                    if symbol in self._closing_positions:
+                        continue
+
                 bars = self.broker.get_bars(symbol, timeframe=Config.TRADING_TIMEFRAME, limit=50)
                 if bars.empty:
                     continue
 
-                # Regime updaten
-                self.risk.update_regime(bars)
+                # KEIN update_regime hier — Regime wird global in scan_once() gesetzt
+                # (verhindert Regime-Flip durch unterschiedliche Symbol-Volatilitaet)
 
                 # ATR berechnen
                 atr = compute_atr(bars)
@@ -1133,6 +1163,12 @@ class Engine:
                         f"EXIT {symbol}: {exit_decision['reason']} "
                         f"| P/L: {plpc:+.1%} | Regime: {self.risk.regime.value}"
                     )
+                    with self._order_lock:
+                        if symbol in self._closing_positions:
+                            logger.warning(f"{symbol}: Close bereits laufend, skip")
+                            continue
+                        self._closing_positions.add(symbol)
+
                     self.broker.close_position(symbol)
                     self.position_highs.pop(symbol, None)
 
@@ -1149,6 +1185,14 @@ class Engine:
         Scannt aktive Watchlist + Spike-Sensor Universum.
         Gibt Liste der erkannten Spike-Symbole zurück (für Telegram-Alerts).
         """
+        # Regime EINMAL global updaten (SPY = Marktproxy) — nicht per Symbol
+        try:
+            spy_bars = self.broker.get_bars("SPY", timeframe="5Min", limit=30)
+            if not spy_bars.empty:
+                self.risk.update_regime(spy_bars)
+        except Exception as e:
+            logger.warning(f"Regime-Update (SPY) fehlgeschlagen: {e}")
+
         active_watchlist = self.watchlist.get_active_watchlist(market_status)
 
         # Spike-Sensor: breiter Markt (nur wenn Markt offen/extended)
