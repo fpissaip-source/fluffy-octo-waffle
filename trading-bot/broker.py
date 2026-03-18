@@ -346,8 +346,13 @@ class AlpacaBroker:
             logger.info(f"CLOSE {symbol} -> Order {order.id}")
             return order.id
         except Exception as e:
-            if "insufficient qty" in str(e).lower() or "position does not exist" in str(e).lower():
+            err = str(e).lower()
+            if "insufficient qty" in err or "position does not exist" in err:
                 logger.info(f"CLOSE {symbol}: Position bereits geschlossen — ignoriert")
+            elif "403" in err or "forbidden" in err:
+                # PDT, Account-Sperre oder reservierte Shares → genaue Meldung zeigen
+                logger.error(f"CLOSE {symbol} 403 FORBIDDEN: {e} | Mögliche Ursachen: "
+                             f"PDT-Schutz (<$25K Equity), Account gesperrt, oder offene Orders reservieren Shares")
             else:
                 logger.error(f"Close failed {symbol}: {e}")
             return None
