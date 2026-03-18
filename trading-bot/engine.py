@@ -914,13 +914,28 @@ class Engine:
                 continue
             if not self.risk.can_open_position(len(self.broker.get_positions())):
                 break
-            logger.info(f"[QUEUE FLUSH] Kaufe Kandidat {symbol} @ ${price:.2f}")
-            self._tg(f"🔄 <b>Queue-Kandidat wird ausgeführt:</b> {symbol} @ ${price:.2f}")
-            order_id = self.broker.market_buy(symbol, c["signal"].qty)
+
+            # ── Vollständige Neubewertung vor Queue-Kauf ──
+            logger.info(f"[QUEUE FLUSH] Prüfe Kandidat {symbol} erneut durch alle Layer...")
+            self._tg(f"🔄 <b>Queue-Check:</b> {symbol} wird nochmal geprüft...")
+            try:
+                new_signal = self.analyze_symbol(symbol)
+                if new_signal is None:
+                    logger.info(f"[QUEUE FLUSH] {symbol}: Signal nicht mehr gültig — aus Queue entfernt")
+                    self._tg(f"❌ <b>Queue-Kandidat veraltet:</b> {symbol} — Signal zu schwach, kein Kauf")
+                    bought.append(symbol)  # aus Queue entfernen
+                    continue
+            except Exception as e:
+                logger.warning(f"[QUEUE FLUSH] {symbol}: Neubewertung fehlgeschlagen ({e}) — überspringe")
+                continue
+
+            logger.info(f"[QUEUE FLUSH] {symbol}: Signal weiterhin gültig — kaufe @ ${price:.2f}")
+            order_id = self.broker.market_buy(symbol, new_signal.qty)
             if order_id:
-                cash -= price * c["signal"].qty
+                cash -= price * new_signal.qty
                 bought.append(symbol)
                 self.position_highs[symbol] = price
+                self._tg(f"✅ <b>Queue-Kauf ausgeführt:</b> {symbol} {new_signal.qty}x @ ${price:.2f}")
 
         if bought:
             with self._candidate_lock:
