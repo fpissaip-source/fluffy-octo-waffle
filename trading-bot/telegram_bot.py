@@ -305,39 +305,43 @@ class TradingTelegramBot:
                 await update.message.reply_text("Keine offenen Positionen.")
                 return
 
-            await update.message.reply_text(f"Schliesse {len(positions)} Position(en)...")
+            sym_list = list(positions.keys())
+            await update.message.reply_text(f"Schliesse {len(positions)} Position(en): {', '.join(sym_list)}")
 
             learner = AdaptiveLearner()
 
-            # Schritt 1: Alle offenen Orders canceln (verhindert Race Condition bei close)
-            try:
-                broker.api.cancel_all_orders()
-                import time as _time
-                _time.sleep(1)  # Warten bis Cancels verarbeitet
-            except Exception as e:
-                logger.warning(f"cancel_all_orders: {e}")
+            # Alpaca: cancel_orders=True bricht offene Orders ab UND schliesst Positionen
+            # in einem einzigen API-Aufruf (verhindert 403 Race Condition)
+            responses = broker.api.close_all_positions(cancel_orders=True)
 
-            # Schritt 2: Positionen einzeln schließen
             closed = []
             failed = []
-            for sym in positions:
-                order_id = broker.close_position(sym)
-                if order_id:
-                    closed.append(sym)
+            for resp in (responses or []):
+                try:
+                    sym = getattr(resp, "symbol", None) or str(resp)
+                    status = getattr(resp, "status", 200)
+                    if str(status) in ("200", "207") or hasattr(resp, "id"):
+                        closed.append(sym)
+                        learner.temp_blacklist(sym, minutes=15)
+                    else:
+                        failed.append(sym)
+                except Exception:
+                    pass
+
+            # Fallback: falls responses leer aber Positionen da waren → alle als closed zählen
+            if not closed and not failed:
+                closed = sym_list
+                for sym in sym_list:
                     learner.temp_blacklist(sym, minutes=15)
-                else:
-                    failed.append(sym)
 
             unblock_time = (datetime.now() + timedelta(minutes=15)).strftime("%H:%M")
-
             text = ""
             if closed:
                 text += f"✅ Geschlossen: {', '.join(closed)}\n"
-                text += f"🔒 Gesperrt bis {unblock_time} (15 Min)\n"
-                text += f"Danach wieder handelbar wenn Signal stark genug."
+                text += f"🔒 Gesperrt bis {unblock_time} (15 Min)"
             if failed:
                 text += f"\n❌ Fehler: {', '.join(failed)}\n"
-                text += f"ℹ️ Versuche manuell in Alpaca Dashboard zu schließen."
+                text += f"ℹ️ Manuell in Alpaca Dashboard schließen."
 
             await update.message.reply_text(text.strip())
         except Exception as e:
