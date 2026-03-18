@@ -125,12 +125,17 @@ class ReasoningLayer:
 
         # ── Learning Summary aus Autopsy-Analyse injizieren ──
         learning_summary = ""
+        learning_trade_count = 0
         if self._learner is not None:
             learning_summary = self._learner.get_learning_summary()
-        learning_section = (
-            f"\nSYSTEM-LERNMUSTER (aus vergangenen Trades automatisch erkannt):\n{learning_summary}\n"
-            if learning_summary else ""
-        )
+            learning_trade_count = len([t for t in self._learner.trade_history if t.exit_price is not None])
+        if learning_summary:
+            reliability = "niedrig (< 20 Trades)" if learning_trade_count < 20 else f"mittel ({learning_trade_count} Trades)" if learning_trade_count < 50 else f"hoch ({learning_trade_count} Trades)"
+            learning_section = (
+                f"\nSYSTEM-LERNMUSTER (Basis: {learning_trade_count} abgeschlossene Trades — Verlässlichkeit: {reliability}):\n{learning_summary}\n"
+            )
+        else:
+            learning_section = ""
 
         prompt = f"""Du bist ein erfahrener quantitativer Trader. Analysiere dieses Trading-Signal und triff eine finale Kaufentscheidung.
 

@@ -335,8 +335,11 @@ class AdaptiveLearner:
         import time
 
         closed_trades = [t for t in self.trade_history if t.exit_price is not None]
-        if len(closed_trades) < 3:
-            logger.info("[LEARNING] Zu wenig abgeschlossene Trades fuer Zusammenfassung")
+        if len(closed_trades) < self.min_trades_to_learn:
+            logger.info(
+                f"[LEARNING] Zu wenig abgeschlossene Trades fuer Zusammenfassung "
+                f"({len(closed_trades)}/{self.min_trades_to_learn})"
+            )
             return ""
 
         # Letzte 30 Trades fuer Analyse
@@ -395,6 +398,8 @@ class AdaptiveLearner:
         avg_loss_str = f"{sum(t.pnl_pct for t in losses)/len(losses):.2%}" if losses else "n/a"
 
         prompt = f"""Du bist ein quantitativer Trading-Analyst. Analysiere die folgenden letzten Trades und erstelle eine KOMPAKTE Lern-Zusammenfassung (max. 8 Sätze auf Deutsch).
+
+WICHTIG: Die Datenbasis umfasst {len(recent)} abgeschlossene Trades. Statistiken aus weniger als 20 Trades haben begrenzte Aussagekraft — weise in deiner Zusammenfassung explizit auf die Stichprobengröße hin und formuliere Muster entsprechend vorsichtig (z.B. "tendiert zu" statt "immer verlustreich").
 
 TRADING-STATISTIK (letzte {len(recent)} Trades):
 - Gewinne: {len(wins)} | Verluste: {len(losses)}
