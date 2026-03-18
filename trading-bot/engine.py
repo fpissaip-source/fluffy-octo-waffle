@@ -1606,18 +1606,24 @@ class Engine:
                             self._closing_positions.discard(symbol)
 
                 bars = self.broker.get_bars(symbol, timeframe=Config.TRADING_TIMEFRAME, limit=50)
-                if bars.empty:
-                    continue
 
-                # KEIN update_regime hier — Regime wird global in scan_once() gesetzt
-                # (verhindert Regime-Flip durch unterschiedliche Symbol-Volatilitaet)
-
-                # ATR berechnen
-                atr = compute_atr(bars)
+                # ATR berechnen (Fallback wenn keine Bars: 1% des Entry-Preises)
                 entry_price = pos["avg_entry"]
+                if bars.empty:
+                    atr = entry_price * 0.01
+                    logger.warning(f"[EXIT] {symbol}: Keine Bars — ATR-Fallback {atr:.4f}")
+                else:
+                    atr = compute_atr(bars)
+
                 # Echtzeit-Preis für Stop-Loss/TP-Prüfung (nicht Bar-Close der veraltet sein kann)
                 live_price = self.broker.get_latest_price(symbol)
-                current_price = live_price if live_price and live_price > 0 else bars["close"].iloc[-1]
+                if not live_price or live_price <= 0:
+                    if not bars.empty:
+                        live_price = bars["close"].iloc[-1]
+                    else:
+                        logger.warning(f"[EXIT] {symbol}: Kein Preis verfügbar — überspringe")
+                        continue
+                current_price = live_price
 
                 # Highest price tracken (fuer Trailing Stop)
                 if symbol not in self.position_highs:
