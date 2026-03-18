@@ -40,6 +40,8 @@ class AlpacaBroker:
             key_id=Config.API_KEY,
             secret_key=Config.SECRET_KEY,
             base_url=Config.BASE_URL,
+            retry=1,       # Standard war 3 — reduziert Wartezeit von 9s auf 3s pro Timeout
+            retry_wait=1,  # 1s statt 3s zwischen Retries
         )
         self._validate_connection()
 
@@ -291,7 +293,10 @@ class AlpacaBroker:
             logger.info(f"CLOSE {symbol} -> Order {order.id}")
             return order.id
         except Exception as e:
-            logger.error(f"Close failed {symbol}: {e}")
+            if "insufficient qty" in str(e).lower() or "position does not exist" in str(e).lower():
+                logger.info(f"CLOSE {symbol}: Position bereits geschlossen — ignoriert")
+            else:
+                logger.error(f"Close failed {symbol}: {e}")
             return None
 
     def get_snapshots_batch(self, symbols: list) -> dict:

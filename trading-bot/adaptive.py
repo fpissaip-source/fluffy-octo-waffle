@@ -395,7 +395,7 @@ class AdaptiveLearner:
 
 TRADING-STATISTIK (letzte {len(recent)} Trades):
 - Gewinne: {len(wins)} | Verluste: {len(losses)}
-- Avg Gewinn: {sum(t.pnl_pct for t in wins)/len(wins):.2%} | Avg Verlust: {sum(t.pnl_pct for t in losses)/len(losses):.2%}
+- Avg Gewinn: {sum(t.pnl_pct for t in wins)/len(wins):.2% if wins else 'n/a'} | Avg Verlust: {sum(t.pnl_pct for t in losses)/len(losses):.2% if losses else 'n/a'}
 - Stop-Loss-Auslösungen: {len(sl_losses)}
 
 LETZTE TRADES:
