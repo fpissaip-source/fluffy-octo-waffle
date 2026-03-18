@@ -27,14 +27,14 @@ class Config:
     STOIKOV_SPREAD_MULT: float = 1.5
 
     SCAN_INTERVAL: int = int(os.getenv("SCAN_INTERVAL", "30"))
-    LOOKBACK_BARS: int = 100
+    LOOKBACK_BARS: int = 200  # 200 × 15min ≈ 50h ≈ 6 Handelstage
     SHORT_WINDOW: int = 10
     LONG_WINDOW: int = 30
 
     # ── Chart-Timeframe (Daytrading: "5Min" / Swing: "1Hour") ──
     # Bestimmt: Kerzenbreite für alle Formeln, ATR-Weite der Stops,
     # Gleitende Durchschnitte, EV-Gap, Momentum — alles skaliert mit.
-    TRADING_TIMEFRAME: str = os.getenv("TRADING_TIMEFRAME", "1Hour")
+    TRADING_TIMEFRAME: str = os.getenv("TRADING_TIMEFRAME", "15Min")
 
     # ── News / Sentiment Horizont ──
     NEWS_LOOKBACK_HOURS: int = int(os.getenv("NEWS_LOOKBACK_HOURS", "72"))   # 3 Tage für Swing-Kontext

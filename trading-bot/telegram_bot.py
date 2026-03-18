@@ -16,6 +16,7 @@ Befehle:
     /screener     - Top-Mover Screener (penny/micro/sub)
     /closeall     - Alle Positionen sofort schliessen
     /erklaer      - Letzter Trade + 2 Versuche + Regime erklaert
+    /test DVLT    - Symbol einmal durch alle 7 Layer schicken (detailliertes Ergebnis)
 """
 
 import asyncio
@@ -458,6 +459,61 @@ class TradingTelegramBot:
 
         await update.message.reply_text(msg3, parse_mode="HTML")
 
+    async def cmd_test(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Schickt ein Symbol einmal durch alle 7 Layer und gibt das Ergebnis detailliert zurueck."""
+        if not context.args:
+            await update.message.reply_text("Usage: /test SYMBOL  (z.B. /test DVLT)")
+            return
+
+        symbol = context.args[0].upper()
+        await update.message.reply_text(f"🔬 Teste <b>{symbol}</b> durch alle 7 Layer...", parse_mode="HTML")
+
+        try:
+            broker = AlpacaBroker()
+            from engine import Engine
+            engine = Engine(broker)
+            signal = engine.analyze_symbol(symbol)
+
+            # Header
+            icon = "🟢" if signal.all_passed else "🔴"
+            lines = [
+                f"{icon} <b>TEST: {symbol}</b>",
+                f"Timeframe: {__import__('config').Config.TRADING_TIMEFRAME} | Bars: {__import__('config').Config.LOOKBACK_BARS}",
+                "━━━━━━━━━━━━━━━━━━━━━━",
+            ]
+
+            # Layer-Ergebnisse
+            layer_names = ["Momentum", "Kelly", "EV-Gap", "KL-Divergence", "Bayesian", "Stoikov", "Sentiment"]
+            for name in layer_names:
+                r = signal.results.get(name)
+                if r is None:
+                    lines.append(f"⬜ {name:<14} — kein Ergebnis")
+                    continue
+                s = "✅" if r["passed"] else "❌"
+                sig_val = r.get("signal", 0)
+                lines.append(f"{s} <b>{name:<14}</b> signal={sig_val:+.4f}")
+
+                # Details wenn vorhanden
+                details = r.get("details", {})
+                if isinstance(details, dict):
+                    for k, v in list(details.items())[:2]:
+                        if not isinstance(v, (dict, list)):
+                            lines.append(f"   └ {k}: {v}")
+
+            lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+
+            # Zusammenfassung
+            passed_count = sum(1 for r in signal.results.values() if r.get("passed"))
+            total = len(signal.results)
+            lines.append(f"Passed: <b>{passed_count}/{total}</b>")
+            lines.append(f"Action: <b>{signal.action}</b>")
+            lines.append(f"Reason: {signal.reason}")
+
+            await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+        except Exception as e:
+            await update.message.reply_text(f"Test error: {e}")
+
     async def cmd_regime(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Zeigt aktuelles Markt-Regime und Risk-Parameter."""
         try:
@@ -779,6 +835,7 @@ Antworte NUR mit JSON:
         self.app.add_handler(CommandHandler("screener", self.cmd_screener))
         self.app.add_handler(CommandHandler("closeall", self.cmd_closeall))
         self.app.add_handler(CommandHandler("erklaer", self.cmd_erklaer))
+        self.app.add_handler(CommandHandler("test", self.cmd_test))
 
         logger.info("Telegram bot running. Send /start to begin.")
         self.app.run_polling(drop_pending_updates=True)
