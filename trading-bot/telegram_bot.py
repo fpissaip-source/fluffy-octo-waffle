@@ -297,6 +297,7 @@ class TradingTelegramBot:
         """Schliesst alle offenen Positionen und sperrt sie 15 Minuten."""
         try:
             from adaptive import AdaptiveLearner
+            from datetime import datetime, timedelta
             broker = AlpacaBroker()
             positions = broker.get_positions()
 
@@ -307,6 +308,16 @@ class TradingTelegramBot:
             await update.message.reply_text(f"Schliesse {len(positions)} Position(en)...")
 
             learner = AdaptiveLearner()
+
+            # Schritt 1: Alle offenen Orders canceln (verhindert Race Condition bei close)
+            try:
+                broker.api.cancel_all_orders()
+                import time as _time
+                _time.sleep(1)  # Warten bis Cancels verarbeitet
+            except Exception as e:
+                logger.warning(f"cancel_all_orders: {e}")
+
+            # Schritt 2: Positionen einzeln schließen
             closed = []
             failed = []
             for sym in positions:
@@ -317,7 +328,6 @@ class TradingTelegramBot:
                 else:
                     failed.append(sym)
 
-            from datetime import datetime, timedelta
             unblock_time = (datetime.now() + timedelta(minutes=15)).strftime("%H:%M")
 
             text = ""
@@ -326,7 +336,8 @@ class TradingTelegramBot:
                 text += f"🔒 Gesperrt bis {unblock_time} (15 Min)\n"
                 text += f"Danach wieder handelbar wenn Signal stark genug."
             if failed:
-                text += f"\n❌ Fehler: {', '.join(failed)}"
+                text += f"\n❌ Fehler: {', '.join(failed)}\n"
+                text += f"ℹ️ Versuche manuell in Alpaca Dashboard zu schließen."
 
             await update.message.reply_text(text.strip())
         except Exception as e:
