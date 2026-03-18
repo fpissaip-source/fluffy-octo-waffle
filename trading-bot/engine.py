@@ -290,12 +290,19 @@ SELL = Sofort verkaufen (Setup hat einen kritischen Fehler / Marktlage hat sich 
                     response_mime_type="application/json",
                     response_schema=response_schema,
                     temperature=0.1,
-                    max_output_tokens=200,
+                    max_output_tokens=500,
                     thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
                 ),
             )
 
-            result = json.loads(response.text or "{}")
+            raw_text = response.text or "{}"
+            try:
+                result = json.loads(raw_text)
+            except json.JSONDecodeError:
+                decision = "SELL" if '"SELL"' in raw_text else "HOLD"
+                logger.warning(f"[HOLD/SELL] {symbol}: JSON truncated, decision extracted: {decision}")
+                result = {"decision": decision, "confidence": 0.5, "reason": "JSON truncated", "risk_factors": []}
+
             should_sell = result.get("decision", "HOLD") == "SELL"
             logger.info(
                 f"[HOLD/SELL] {symbol}: {result.get('decision')} "
@@ -307,7 +314,7 @@ SELL = Sofort verkaufen (Setup hat einen kritischen Fehler / Marktlage hat sich 
                 "reason": result.get("reason", ""),
                 "risk_factors": result.get("risk_factors", []),
                 "prompt": prompt,
-                "raw_response": response.text or "",
+                "raw_response": raw_text,
             }
 
         except Exception as e:
@@ -377,12 +384,19 @@ SELL = Sofort schliessen (zu riskant, Markt hat sich gedreht, oder Unsicherheit 
                     response_mime_type="application/json",
                     response_schema=response_schema,
                     temperature=0.1,
-                    max_output_tokens=200,
+                    max_output_tokens=500,
                     thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
                 ),
             )
 
-            result = json.loads(response.text or "{}")
+            raw_text = response.text or "{}"
+            try:
+                result = json.loads(raw_text)
+            except json.JSONDecodeError:
+                decision = "SELL" if '"SELL"' in raw_text else "HOLD"
+                logger.warning(f"[STARTUP-REVIEW] {symbol}: JSON truncated, decision extracted: {decision}")
+                result = {"decision": decision, "confidence": 0.5, "reason": "JSON truncated", "risk_factors": []}
+
             should_sell = result.get("decision", "SELL") == "SELL"  # Default SELL bei Unsicherheit
             logger.info(
                 f"[STARTUP-REVIEW] {symbol}: {result.get('decision')} "
