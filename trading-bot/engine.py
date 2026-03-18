@@ -782,6 +782,7 @@ class TradeSignal:
             self.all_passed = False
             self.action = "HOLD"
             failed = [n for n, r in self.results.items() if not r["passed"]]
+            total = len(self.results)
             self.reason = f"Zu schwach: nur {passed_count}/{total} — Gemini nicht befragt. Failed: {', '.join(failed)}"
             return
 
@@ -1395,6 +1396,11 @@ class Engine:
         price = self.broker.get_latest_price(signal.symbol) or 1
         max_qty = self.risk.max_position_size(equity, price)
         signal.qty = min(signal.qty, max_qty)
+        if signal.qty <= 0:
+            logger.warning(f"{signal.symbol}: qty=0 nach Risk-Sizing (equity={equity:.0f}, price={price:.2f}) — abgebrochen")
+            with self._order_lock:
+                self._pending_buys.discard(signal.symbol)
+            return None
 
         # Kein Cash → Kandidaten-Queue
         cash = self.broker.api.get_account().cash
