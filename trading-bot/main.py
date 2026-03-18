@@ -111,18 +111,24 @@ def main():
         engine = Engine()
         start_api_server(broker=engine.broker, port=int(os.getenv("BOT_API_PORT", "5001")))
 
-        if args.telegram:
-            if not Config.TELEGRAM_TOKEN or Config.TELEGRAM_TOKEN == "your_telegram_bot_token_here":
-                print("  Telegram nicht konfiguriert!")
-                print("  Trage TELEGRAM_TOKEN und TELEGRAM_CHAT_ID in .env ein.")
-                print("  Siehe README fuer Anleitung.\n")
-                sys.exit(1)
+        telegram_configured = (
+            Config.TELEGRAM_TOKEN
+            and Config.TELEGRAM_TOKEN != "your_telegram_bot_token_here"
+            and Config.TELEGRAM_CHAT_ID
+        )
+
+        if telegram_configured:
             import threading
             t = threading.Thread(target=engine.run, daemon=True, name="engine")
             t.start()
             from telegram_bot import TradingTelegramBot
-            bot = TradingTelegramBot()
+            bot = TradingTelegramBot(engine=engine)
             bot.run()
+        elif args.telegram:
+            print("  Telegram nicht konfiguriert!")
+            print("  Trage TELEGRAM_TOKEN und TELEGRAM_CHAT_ID in .env ein.")
+            print("  Siehe README fuer Anleitung.\n")
+            sys.exit(1)
         else:
             engine.run()
 

@@ -35,11 +35,11 @@ logger = logging.getLogger("bot.telegram")
 
 
 class TradingTelegramBot:
-    def __init__(self):
+    def __init__(self, engine: Optional[Engine] = None):
         self.token = Config.TELEGRAM_TOKEN
         self.chat_id = Config.TELEGRAM_CHAT_ID
-        self.engine: Optional[Engine] = None
-        self.is_running = False
+        self.engine: Optional[Engine] = engine
+        self.is_running = engine is not None
         self.is_paused = False
         self.scan_thread: Optional[threading.Thread] = None
         self.app: Optional[Application] = None
@@ -251,7 +251,8 @@ class TradingTelegramBot:
 
         self.is_running = True
         self.is_paused = False
-        self.engine = Engine()
+        if self.engine is None:
+            self.engine = Engine()
         self.engine.notify = self.send_sync   # Telegram-Callback direkt in Engine
         self.scan_thread = threading.Thread(target=self._scan_loop, daemon=True)
         self.scan_thread.start()
