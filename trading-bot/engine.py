@@ -1091,7 +1091,7 @@ class Engine:
         signal = TradeSignal(symbol)
 
         bars = self.broker.get_bars(symbol, timeframe=Config.TRADING_TIMEFRAME, limit=Config.LOOKBACK_BARS)
-        if bars.empty or len(bars) < 50:
+        if bars.empty or len(bars) < 20:
             bars_count = len(bars) if not bars.empty else 0
             logger.warning(f"{symbol}: Not enough data ({bars_count} bars)")
             # ── Auto-Remove: nur manuelle Watchlist, erst nach 3x 0 Bars ──
