@@ -53,6 +53,10 @@ class Config:
     # ── LunarCrush (optional — Crypto Sentiment) ──
     LUNARCRUSH_API_KEY: str = os.getenv("LUNARCRUSH_API_KEY", "")
 
+    # ── Finnhub (Earnings Calendar + Insider Trades) ──
+    FINNHUB_API_KEY: str = os.getenv("FINNHUB_API_KEY", "")
+    FINNHUB_EARNINGS_BLOCK_DAYS: int = 3   # Kein Trade wenn Earnings ≤3 Tage entfernt
+
     # ── Reasoning Layer Einstellungen ──
     REASONING_MODEL: str = "gemini-2.5-flash"
     REASONING_MIN_CONFIDENCE: float = 0.55  # 55% — weniger restriktiv (war 65%)

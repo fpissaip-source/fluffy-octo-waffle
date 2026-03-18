@@ -167,6 +167,133 @@ class SectorFetcher:
         return result
 
 
+class FinnhubClient:
+    """
+    Finnhub Integration — zwei Signale:
+    1. Earnings Calendar → Block wenn Earnings ≤ N Tage entfernt
+    2. Insider Transactions → Kaufsignal wenn Insider kaufen
+    """
+
+    BASE_URL = "https://finnhub.io/api/v1"
+
+    def __init__(self):
+        self.api_key = Config.FINNHUB_API_KEY
+        self.available = bool(self.api_key)
+        self._cache: dict = {}
+        self._cache_ttl = 3600  # 1 Stunde (Earnings ändern sich selten)
+
+    def _get(self, endpoint: str, params: dict) -> Optional[dict]:
+        if not self.available:
+            return None
+        cache_key = f"{endpoint}:{sorted(params.items())}"
+        if cache_key in self._cache:
+            ts, data = self._cache[cache_key]
+            if time.time() - ts < self._cache_ttl:
+                return data
+        try:
+            params["token"] = self.api_key
+            resp = requests.get(
+                f"{self.BASE_URL}/{endpoint}",
+                params=params,
+                timeout=5,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                self._cache[cache_key] = (time.time(), data)
+                return data
+        except Exception as e:
+            logger.warning(f"Finnhub {endpoint} failed: {e}")
+        return None
+
+    def days_to_earnings(self, symbol: str) -> Optional[int]:
+        """
+        Gibt zurück wie viele Tage bis zum nächsten Earnings-Termin.
+        None = kein Termin bekannt.
+        """
+        from datetime import date, timedelta
+        today = date.today()
+        look_ahead = (today + timedelta(days=30)).isoformat()
+
+        data = self._get("calendar/earnings", {
+            "from": today.isoformat(),
+            "to": look_ahead,
+            "symbol": symbol,
+        })
+        if not data:
+            return None
+
+        earnings_list = data.get("earningsCalendar", [])
+        if not earnings_list:
+            return None
+
+        # Nächster zukünftiger Termin
+        for entry in sorted(earnings_list, key=lambda x: x.get("date", "")):
+            try:
+                earn_date = date.fromisoformat(entry["date"])
+                days = (earn_date - today).days
+                if days >= 0:
+                    logger.info(f"[Finnhub] {symbol} Earnings in {days} Tagen ({earn_date})")
+                    return days
+            except Exception:
+                continue
+        return None
+
+    def is_earnings_blackout(self, symbol: str) -> bool:
+        """True wenn Earnings ≤ FINNHUB_EARNINGS_BLOCK_DAYS Tage entfernt."""
+        if not self.available:
+            return False
+        days = self.days_to_earnings(symbol)
+        if days is None:
+            return False
+        blocked = days <= Config.FINNHUB_EARNINGS_BLOCK_DAYS
+        if blocked:
+            logger.warning(
+                f"[Finnhub] EARNINGS BLACKOUT {symbol}: "
+                f"Earnings in {days} Tagen — kein Trade!"
+            )
+        return blocked
+
+    def insider_signal(self, symbol: str) -> float:
+        """
+        Insider-Transaktions-Signal: +1 (starkes Kaufen) bis -1 (starkes Verkaufen).
+        Basiert auf Netto-Käufe der letzten 90 Tage.
+        """
+        from datetime import date, timedelta
+        data = self._get("stock/insider-transactions", {"symbol": symbol})
+        if not data:
+            return 0.0
+
+        transactions = data.get("data", [])
+        cutoff = (date.today() - timedelta(days=90)).isoformat()
+
+        buy_value = 0.0
+        sell_value = 0.0
+        for tx in transactions:
+            if tx.get("transactionDate", "") < cutoff:
+                continue
+            shares = abs(tx.get("share", 0) or 0)
+            price = abs(tx.get("price", 0) or 0)
+            value = shares * price
+            tx_type = (tx.get("transactionCode") or "").upper()
+            if tx_type in ("P",):       # Purchase
+                buy_value += value
+            elif tx_type in ("S",):     # Sale
+                sell_value += value
+
+        total = buy_value + sell_value
+        if total == 0:
+            return 0.0
+
+        # Netto-Signal: +1 = alles Käufe, -1 = alles Verkäufe
+        signal = (buy_value - sell_value) / total
+        logger.info(
+            f"[Finnhub] Insider {symbol}: "
+            f"Käufe=${buy_value:,.0f} Verkäufe=${sell_value:,.0f} "
+            f"Signal={signal:+.2f}"
+        )
+        return round(signal, 3)
+
+
 class MarketContext:
     """
     Aggregiert alle Markt-Kontext-Daten fuer den Reasoning Layer.
@@ -177,6 +304,7 @@ class MarketContext:
         self.vix = VIXFetcher()
         self.lunar = LunarCrushFetcher()
         self.sectors = SectorFetcher()
+        self.finnhub = FinnhubClient()
 
     def get_context(self, symbol: str) -> dict:
         """Gibt vollen Markt-Kontext fuer ein Symbol zurueck."""
@@ -188,7 +316,12 @@ class MarketContext:
             "vix": vix_data,
             "sectors": sector_data,
             "lunar": lunar_data,
+            "finnhub_insider": self.finnhub.insider_signal(symbol) if not symbol.endswith("USD") else 0.0,
         }
+
+    def is_earnings_blackout(self, symbol: str) -> bool:
+        """Delegiert an FinnhubClient — wird von engine.py vor jeder Order geprüft."""
+        return self.finnhub.is_earnings_blackout(symbol)
 
     def format_for_prompt(self, symbol: str) -> str:
         """Formatiert Kontext als Text fuer GPT-4o Prompt."""
@@ -218,5 +351,11 @@ class MarketContext:
                 f"Sentiment={l.get('sentiment', 'n/a')}/5 "
                 f"SocialVol={l.get('social_volume', 'n/a')}"
             )
+
+        # Finnhub Insider Signal (nur Aktien)
+        insider = ctx.get("finnhub_insider", 0.0)
+        if insider != 0.0:
+            direction = "KAUFEN" if insider > 0 else "VERKAUFEN"
+            lines.append(f"  - Insider Trades (90d): {direction} ({insider:+.2f})")
 
         return "\n".join(lines)

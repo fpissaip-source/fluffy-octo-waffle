@@ -1157,6 +1157,12 @@ class Engine:
             logger.warning(f"{signal.symbol}: All passed but qty=0")
             return None
 
+        # ── Finnhub Earnings Blackout ──────────────────────────────────────
+        # Kein Trade wenn Earnings ≤ FINNHUB_EARNINGS_BLOCK_DAYS Tage entfernt
+        if self.reasoning.market_ctx.is_earnings_blackout(signal.symbol):
+            logger.warning(f"{signal.symbol}: EARNINGS BLACKOUT — Trade blockiert")
+            return None
+
         # Kein doppelter Buy wenn bereits eine Order oder Position laeuft
         with self._order_lock:
             if signal.symbol in self._pending_buys:
