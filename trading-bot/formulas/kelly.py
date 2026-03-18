@@ -49,8 +49,13 @@ def evaluate(bars: pd.DataFrame, equity: float = 10000.0, **kwargs) -> dict:
     else:
         slippage_pct = Config.SLIPPAGE_BPS / 10000  # Standard (10 bps)
     cost_pct = (slippage_pct + Config.FEE_BPS / 10000) * 2  # Roundtrip
-    adj_gain = max(avg_gain - cost_pct, 0.0001)
-    adj_loss = avg_loss + cost_pct
+    # Kosten über erwartete Haltedauer amortisieren (bei 15Min ≈ 16 Bars = 4h)
+    _bars_per_hour = {"1Min": 60, "5Min": 12, "15Min": 4, "1Hour": 1, "1Day": 0.125}
+    bph = _bars_per_hour.get(Config.TRADING_TIMEFRAME, 4)
+    hold_bars = max(1, round(4 * bph))  # 4 Stunden erwartete Haltedauer
+    cost_per_bar = cost_pct / hold_bars
+    adj_gain = max(avg_gain - cost_per_bar, 0.0001)
+    adj_loss = avg_loss + cost_per_bar
     payoff = min(adj_gain / adj_loss, 10.0)
 
     full_kelly = kelly_fraction(win_prob, payoff)

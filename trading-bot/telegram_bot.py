@@ -459,6 +459,48 @@ class TradingTelegramBot:
 
         await update.message.reply_text(msg3, parse_mode="HTML")
 
+    async def cmd_stoplosses(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Zeigt aktive Positionen mit Stop-Loss und Take-Profit Levels."""
+        try:
+            from risk_manager import RiskManager, compute_atr
+            broker = AlpacaBroker()
+            positions = broker.get_positions()
+
+            if not positions:
+                await update.message.reply_text("Keine offenen Positionen.")
+                return
+
+            risk = RiskManager()
+            lines = ["<b>📊 Aktive Positionen + Stop-Loss</b>", "━━━━━━━━━━━━━━━━━━━━━━"]
+
+            for symbol, pos in positions.items():
+                try:
+                    from config import Config
+                    bars = broker.get_bars(symbol, timeframe=Config.TRADING_TIMEFRAME, limit=50)
+                    atr = compute_atr(bars) if not bars.empty else 0.0
+                    entry = pos["avg_entry"]
+                    current = pos["unrealized_plpc"]
+                    stops = risk.calculate_stops(entry, atr)
+
+                    plpc = pos["unrealized_plpc"]
+                    pl_icon = "🟢" if plpc >= 0 else "🔴"
+
+                    lines.append(
+                        f"{pl_icon} <b>{symbol}</b>  {plpc:+.1%}\n"
+                        f"  Einstieg: ${entry:.2f}\n"
+                        f"  Stop Loss: ${stops['stop_loss']:.2f} ({stops['stop_loss_pct']})\n"
+                        f"  Take Profit: ${stops['take_profit']:.2f} ({stops['take_profit_pct']})\n"
+                        f"  R/R: {stops['risk_reward']}x | ATR: {stops['atr']:.4f}"
+                    )
+                except Exception as e:
+                    lines.append(f"⬜ <b>{symbol}</b>: {e}")
+
+            lines.append(f"━━━━━━━━━━━━━━━━━━━━━━\nRegime: {risk.regime.value}")
+            await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+        except Exception as e:
+            await update.message.reply_text(f"Error: {e}")
+
     async def cmd_test(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Schickt ein Symbol einmal durch alle 7 Layer und gibt das Ergebnis detailliert zurueck."""
         if not context.args:
@@ -836,6 +878,7 @@ Antworte NUR mit JSON:
         self.app.add_handler(CommandHandler("closeall", self.cmd_closeall))
         self.app.add_handler(CommandHandler("erklaer", self.cmd_erklaer))
         self.app.add_handler(CommandHandler("test", self.cmd_test))
+        self.app.add_handler(CommandHandler("stoplosses", self.cmd_stoplosses))
 
         logger.info("Telegram bot running. Send /start to begin.")
         self.app.run_polling(drop_pending_updates=True)
