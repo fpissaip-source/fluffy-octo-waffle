@@ -147,6 +147,9 @@ def main():
         )
 
         if telegram_configured:
+            # Kurz warten damit ein evtl. laufender alter Bot-Prozess Telegram freigibt
+            import time
+            time.sleep(3)
             # Telegram-Bot ZUERST starten — antwortet sofort auf Nachrichten
             # Engine laeuft im Hintergrund (Initialisierung kann dauern)
             from telegram_bot import TradingTelegramBot
