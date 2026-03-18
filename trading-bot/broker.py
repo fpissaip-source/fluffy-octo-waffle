@@ -319,22 +319,22 @@ class AlpacaBroker:
                     time_in_force="gtc", qty=self._get_position_qty(symbol),
                 )
             elif market_status == "extended":
-                # Extended Hours: Limit-Order zum aktuellen Bid (wird sofort gefüllt)
+                # Extended Hours: IMMER Limit-Order (Market-Orders funktionieren nicht!)
                 snap = self.get_snapshot(symbol)
                 bid = snap.get("bid") if snap else None
+                last = snap.get("last") if snap else None
                 qty = self._get_position_qty(symbol)
-                if bid and bid > 0 and qty:
+                # Limit-Preis: Bid > Last-Price > Position-Entry (immer etwas darunter für sofortigen Fill)
+                pos = self.api.get_position(symbol)
+                entry = float(pos.avg_entry_price) if pos else None
+                limit_price = bid or last or entry
+                if limit_price and limit_price > 0 and qty:
+                    # 0.5% unter Bid/Last → sofortiger Fill wahrscheinlich
+                    limit_price = round(limit_price * 0.995, 2)
                     order = self.api.submit_order(
                         symbol=symbol, qty=qty, side="sell",
                         type="limit", time_in_force="day",
-                        limit_price=round(bid, 2),
-                        extended_hours=True,
-                    )
-                elif qty:
-                    # Kein Bid verfügbar (Low-Liquidity) → Market-Order mit extended_hours
-                    order = self.api.submit_order(
-                        symbol=symbol, qty=qty, side="sell",
-                        type="market", time_in_force="day",
+                        limit_price=limit_price,
                         extended_hours=True,
                     )
                 else:
