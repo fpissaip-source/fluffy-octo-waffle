@@ -391,11 +391,14 @@ class AdaptiveLearner:
         losses = [t for t in recent if t.pnl_pct <= 0]
         sl_losses = [t for t in losses if "STOP LOSS" in (t.exit_reason or "")]
 
+        avg_win_str  = f"{sum(t.pnl_pct for t in wins)/len(wins):.2%}"   if wins   else "n/a"
+        avg_loss_str = f"{sum(t.pnl_pct for t in losses)/len(losses):.2%}" if losses else "n/a"
+
         prompt = f"""Du bist ein quantitativer Trading-Analyst. Analysiere die folgenden letzten Trades und erstelle eine KOMPAKTE Lern-Zusammenfassung (max. 8 Sätze auf Deutsch).
 
 TRADING-STATISTIK (letzte {len(recent)} Trades):
 - Gewinne: {len(wins)} | Verluste: {len(losses)}
-- Avg Gewinn: {sum(t.pnl_pct for t in wins)/len(wins):.2% if wins else 'n/a'} | Avg Verlust: {sum(t.pnl_pct for t in losses)/len(losses):.2% if losses else 'n/a'}
+- Avg Gewinn: {avg_win_str} | Avg Verlust: {avg_loss_str}
 - Stop-Loss-Auslösungen: {len(sl_losses)}
 
 LETZTE TRADES:
