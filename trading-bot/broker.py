@@ -1,6 +1,8 @@
 """broker.py — Alpaca API Wrapper. Handles account, market data, orders."""
 
 import logging
+import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -11,6 +13,9 @@ import numpy as np
 from config import Config
 
 logger = logging.getLogger("bot.broker")
+
+# Symbole ohne IEX-Daten — werden nicht nochmal versucht (bis Bot-Neustart)
+_iex_blacklist: set[str] = set()
 
 CRYPTO_SYMBOLS = {"BTCUSD", "ETHUSD", "SOLUSD", "AVAXUSD", "LINKUSD"}
 
@@ -67,6 +72,12 @@ class AlpacaBroker:
         return symbol in self.get_positions()
 
     def get_bars(self, symbol: str, timeframe: str = "5Min", limit: int = 100) -> pd.DataFrame:
+        global _iex_blacklist
+
+        # Sofort überspringen wenn kein IEX-Daten bekannt
+        if symbol in _iex_blacklist:
+            return pd.DataFrame()
+
         tf_map = {
             "1Min": tradeapi.TimeFrame.Minute,
             "5Min": tradeapi.TimeFrame(5, tradeapi.TimeFrameUnit.Minute),
@@ -76,10 +87,8 @@ class AlpacaBroker:
         }
         tf = tf_map.get(timeframe, tradeapi.TimeFrame(5, tradeapi.TimeFrameUnit.Minute))
         end = datetime.now()
-        # Korrekte Tagesberechnung je nach Timeframe (war: immer limit//78 = 5Min-Formel)
         _bars_per_day = {"1Min": 390, "5Min": 78, "15Min": 26, "1Hour": 7, "1Day": 1}
         _bpd = _bars_per_day.get(timeframe, 78)
-        # x2 für Wochenenden/Feiertage, mindestens 14 Tage Puffer
         start = end - timedelta(days=max(14, (limit // _bpd + 3) * 2))
 
         is_crypto = symbol.upper() in CRYPTO_SYMBOLS
@@ -90,14 +99,31 @@ class AlpacaBroker:
             limit=limit,
         )
 
-        if is_crypto:
-            bars = self.api.get_crypto_bars(_alpaca_crypto(symbol), tf, **kwargs).df
-        else:
-            kwargs["feed"] = "iex"
-            bars = self.api.get_bars(symbol, tf, **kwargs).df
+        try:
+            if is_crypto:
+                def _fetch():
+                    return self.api.get_crypto_bars(_alpaca_crypto(symbol), tf, **kwargs).df
+            else:
+                kwargs["feed"] = "iex"
+                def _fetch():
+                    return self.api.get_bars(symbol, tf, **kwargs).df
+
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_fetch)
+                try:
+                    bars = future.result(timeout=6)
+                except FuturesTimeoutError:
+                    logger.warning(f"Bars timeout für {symbol} — zur Blacklist hinzugefügt")
+                    _iex_blacklist.add(symbol)
+                    return pd.DataFrame()
+
+        except Exception as e:
+            logger.warning(f"Bars fetch fehlgeschlagen für {symbol}: {e}")
+            return pd.DataFrame()
 
         if bars.empty:
-            logger.warning(f"No bars for {symbol}")
+            logger.warning(f"No bars for {symbol} — zur Blacklist hinzugefügt")
+            _iex_blacklist.add(symbol)
             return pd.DataFrame()
 
         bars = bars.tail(limit).copy()
