@@ -12,6 +12,7 @@ Output: Sentiment-Score von -1.0 (extrem bearish) bis +1.0 (extrem bullish)
 import logging
 import time
 import re
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -84,49 +85,64 @@ class NewsFetcher:
     def __init__(self, broker):
         self.api = broker.api
 
+    def _fetch_with_timeout(self, fn, timeout: int = 5):
+        """Führt eine API-Funktion mit Timeout aus. Gibt None zurück bei Timeout."""
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(fn)
+            try:
+                return future.result(timeout=timeout)
+            except FuturesTimeoutError:
+                logger.warning("News API timeout nach 5s — übersprungen")
+                return None
+            except Exception as e:
+                logger.warning(f"News API Fehler: {e}")
+                return None
+
     def get_news(self, symbol: str, limit: int = 10, hours_back: int = 24) -> list[dict]:
         """Holt aktuelle News fuer ein Symbol."""
-        try:
-            end = datetime.now()
-            start = end - timedelta(hours=hours_back)
+        end = datetime.now()
+        start = end - timedelta(hours=hours_back)
 
-            news = self.api.get_news(
+        def _fetch():
+            return self.api.get_news(
                 symbol=symbol,
                 start=start.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 end=end.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 limit=limit,
             )
 
-            articles = []
-            for item in news:
-                articles.append({
-                    "headline": item.headline,
-                    "summary": getattr(item, "summary", "") or "",
-                    "source": getattr(item, "source", "unknown"),
-                    "created_at": str(item.created_at),
-                    "symbols": getattr(item, "symbols", []),
-                })
-
-            logger.debug(f"{symbol}: {len(articles)} articles found")
-            return articles
-
-        except Exception as e:
-            logger.warning(f"News fetch failed for {symbol}: {e}")
+        news = self._fetch_with_timeout(_fetch, timeout=5)
+        if news is None:
             return []
 
-    def get_market_news(self, limit: int = 15) -> list[dict]:
-        """Holt allgemeine Markt-News (nicht symbol-spezifisch)."""
-        try:
-            news = self.api.get_news(limit=limit)
-            return [{
+        articles = []
+        for item in news:
+            articles.append({
                 "headline": item.headline,
                 "summary": getattr(item, "summary", "") or "",
                 "source": getattr(item, "source", "unknown"),
                 "created_at": str(item.created_at),
-            } for item in news]
-        except Exception as e:
-            logger.warning(f"Market news fetch failed: {e}")
+                "symbols": getattr(item, "symbols", []),
+            })
+
+        logger.debug(f"{symbol}: {len(articles)} articles found")
+        return articles
+
+    def get_market_news(self, limit: int = 15) -> list[dict]:
+        """Holt allgemeine Markt-News (nicht symbol-spezifisch)."""
+        def _fetch():
+            return self.api.get_news(limit=limit)
+
+        news = self._fetch_with_timeout(_fetch, timeout=5)
+        if news is None:
             return []
+
+        return [{
+            "headline": item.headline,
+            "summary": getattr(item, "summary", "") or "",
+            "source": getattr(item, "source", "unknown"),
+            "created_at": str(item.created_at),
+        } for item in news]
 
 
 # ═══════════════════════════════════════════════════════
