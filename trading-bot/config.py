@@ -19,7 +19,7 @@ class Config:
     ]
 
     MAX_POSITION_PCT: float = float(os.getenv("MAX_POSITION_PCT", "0.10"))
-    KELLY_FRACTION: float = float(os.getenv("KELLY_FRACTION", "0.25"))
+    KELLY_FRACTION: float = float(os.getenv("KELLY_FRACTION", "0.50"))
     MIN_EV_GAP: float = float(os.getenv("MIN_EV_GAP", "0.01"))
     MIN_MOMENTUM_SCORE: float = float(os.getenv("MIN_MOMENTUM_SCORE", "0.50"))
     KL_DIVERGENCE_THRESHOLD: float = 0.15
