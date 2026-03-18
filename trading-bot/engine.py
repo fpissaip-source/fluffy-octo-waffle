@@ -1704,12 +1704,13 @@ class Engine:
                 summary = self.learner.generate_learning_summary(self.reasoning.client)
                 if summary:
                     logger.info("[LEARNING] Summary aktualisiert — wird in naechste Gemini-Prompts injiziert")
-                    # Telegram-Notification
-                    first_line = summary.split("\n")[0][:80] if summary else ""
+                    # Telegram-Notification: erste 3 nicht-leere Zeilen zeigen
+                    lines = [l.strip() for l in summary.split("\n") if l.strip()]
+                    preview = "\n".join(lines[:3])[:400]
                     self._tg(
                         f"🧠 <b>Bot-Lernupdate</b>\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"<i>{first_line}...</i>"
+                        f"<i>{preview}</i>"
                     )
             except Exception as e:
                 logger.error(f"[LEARNING] Hintergrund-Refresh fehlgeschlagen: {e}")
