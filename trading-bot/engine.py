@@ -1093,12 +1093,11 @@ class Engine:
         if bars.empty or len(bars) < 50:
             bars_count = len(bars) if not bars.empty else 0
             logger.warning(f"{symbol}: Not enough data ({bars_count} bars)")
-            # ── Auto-Remove: kein oder kaum Daten → Symbol unbrauchbar ──
-            if bars_count < 10 and symbol in Config.WATCHLIST:
+            # ── Auto-Remove: 0 Bars → delisted ──
+            if bars_count == 0 and symbol in Config.WATCHLIST:
                 Config.WATCHLIST.remove(symbol)
-                reason = "keine Kursdaten — vermutlich delisted" if bars_count == 0 else f"nur {bars_count} Bars — zu illiquide"
-                logger.warning(f"[WATCHLIST] {symbol}: Automatisch entfernt ({reason})")
-                self._tg(f"🗑 <b>{symbol}</b> von Watchlist entfernt ({reason})")
+                logger.warning(f"[WATCHLIST] {symbol}: 0 Bars — vermutlich delisted. Automatisch entfernt.")
+                self._tg(f"🗑 <b>{symbol}</b> von Watchlist entfernt (keine Kursdaten — vermutlich delisted)")
             signal.reason = "Insufficient data"
             return signal
 
