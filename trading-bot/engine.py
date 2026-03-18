@@ -314,6 +314,91 @@ SELL = Sofort verkaufen (Setup hat einen kritischen Fehler / Marktlage hat sich 
             logger.error(f"[HOLD/SELL] {symbol}: Gemini Fehler: {e} → HOLD (sicherer Default)")
             return {"sell": False, "confidence": 0.0, "reason": f"Fehler: {e}", "risk_factors": []}
 
+    def review_existing_position(
+        self,
+        symbol: str,
+        entry_price: float,
+        current_price: float,
+        pnl_pct: float,
+        atr: float,
+        regime: str,
+        equity: float,
+    ) -> dict:
+        """
+        Startup-Review: Bot wurde neu gestartet, Position war noch offen.
+        Gemini bewertet ob die Position gehalten oder sofort verkauft werden soll.
+        Bei Unsicherheit gilt: Sicherheit vor Gewinn — lieber SELL als Risiko.
+        """
+        market_context_str = self.market_ctx.format_for_prompt(symbol)
+
+        prompt = f"""Du bist ein erfahrener Trader. Der Trading-Bot wurde neu gestartet (Absturz oder manueller Neustart).
+Die folgende Position war beim Neustart noch offen und wurde in der Zwischenzeit NICHT ueberwacht.
+
+SYMBOL: {symbol}
+EINSTIEG: ${entry_price:.2f}  |  AKTUELL: ${current_price:.2f}  |  P/L: {pnl_pct:+.2f}%
+ATR: ${atr:.3f}  |  Depot: ${equity:,.2f}
+MARKT-REGIME: {regime}
+
+MARKT-KONTEXT:
+{market_context_str}
+
+Wichtige Fragen die du beantworten sollst:
+- Ist die aktuelle P/L akzeptabel oder gefaehrlich?
+- Hat sich der Markt gegen diese Position gedreht?
+- Ist das Risiko ohne aktive Ueberwachung zu hoch?
+
+Bei Zweifeln gilt: SELL ist sicherer als eine unkontrollierte Position zu halten.
+HOLD nur wenn das Setup klar valide ist und das Risiko ueberschaubar bleibt.
+
+HOLD = Position weiterlaufen lassen (Setup ist valide, Risiko kontrolliert)
+SELL = Sofort schliessen (zu riskant, Markt hat sich gedreht, oder Unsicherheit zu hoch)"""
+
+        try:
+            from google.genai import types as genai_types
+
+            response_schema = genai_types.Schema(
+                type=genai_types.Type.OBJECT,
+                properties={
+                    "decision":     genai_types.Schema(type=genai_types.Type.STRING, enum=["HOLD", "SELL"]),
+                    "confidence":   genai_types.Schema(type=genai_types.Type.NUMBER),
+                    "reason":       genai_types.Schema(type=genai_types.Type.STRING),
+                    "risk_factors": genai_types.Schema(
+                        type=genai_types.Type.ARRAY,
+                        items=genai_types.Schema(type=genai_types.Type.STRING),
+                    ),
+                },
+                required=["decision", "confidence", "reason", "risk_factors"],
+            )
+
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=prompt,
+                config=genai_types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=response_schema,
+                    temperature=0.1,
+                    max_output_tokens=200,
+                    thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
+                ),
+            )
+
+            result = json.loads(response.text or "{}")
+            should_sell = result.get("decision", "SELL") == "SELL"  # Default SELL bei Unsicherheit
+            logger.info(
+                f"[STARTUP-REVIEW] {symbol}: {result.get('decision')} "
+                f"({result.get('confidence', 0):.0%}) — {result.get('reason', '')}"
+            )
+            return {
+                "sell": should_sell,
+                "confidence": float(result.get("confidence", 0)),
+                "reason": result.get("reason", ""),
+                "risk_factors": result.get("risk_factors", []),
+            }
+
+        except Exception as e:
+            logger.error(f"[STARTUP-REVIEW] {symbol}: Gemini Fehler: {e} → SELL (sicherer Default)")
+            return {"sell": True, "confidence": 0.0, "reason": f"Gemini nicht erreichbar: {e}", "risk_factors": ["gemini_error"]}
+
 
 # ═══════════════════════════════════════════════════════
 #  DYNAMISCHE WATCHLIST (Gemini findet neue Aktien)
@@ -719,6 +804,144 @@ class Engine:
                 self.notify(text)
             except Exception as e:
                 logger.warning(f"Telegram notify failed: {e}")
+
+    def _close_with_protection(self, symbol: str) -> bool:
+        """Close mit Doppel-Close Schutz. Gibt True zurueck wenn Order abgesetzt."""
+        with self._order_lock:
+            if symbol in self._closing_positions:
+                return False
+            self._closing_positions.add(symbol)
+        self.broker.close_position(symbol)
+        self.position_highs.pop(symbol, None)
+        return True
+
+    def startup_position_review(self):
+        """
+        Beim Start: Alle offenen Positionen pruefen ob sie gehalten oder verkauft werden sollen.
+        Laueft EINMAL bevor der normale Scan beginnt.
+        Schuetzt vor veralteten / unkontrollierten Positionen nach Neustart.
+        """
+        positions = self.broker.get_positions()
+
+        if not positions:
+            logger.info("[STARTUP] Keine offenen Positionen — sauberer Start.")
+            return
+
+        logger.info(f"[STARTUP] {len(positions)} offene Position(en) gefunden — pruefe...")
+        self._tg(
+            f"🔍 <b>STARTUP CHECK</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"{len(positions)} offene Position(en) werden geprueft...\n"
+            f"<i>Gemini bewertet ob Positionen gehalten oder verkauft werden sollen.</i>"
+        )
+
+        equity = self.broker.get_equity()
+
+        # Regime einmalig via SPY updaten
+        try:
+            spy_bars = self.broker.get_bars("SPY", timeframe="5Min", limit=30)
+            if not spy_bars.empty:
+                self.risk.update_regime(spy_bars, force=True)
+        except Exception:
+            pass
+
+        sold = []
+        held = []
+        errors = []
+
+        for symbol, pos in positions.items():
+            try:
+                entry_price = pos["avg_entry"]
+                current_price = self.broker.get_latest_price(symbol) or entry_price
+                pnl_pct = (current_price - entry_price) / entry_price * 100 if entry_price > 0 else 0
+
+                logger.info(f"[STARTUP] Pruefe {symbol}: Einstieg=${entry_price:.2f} Aktuell=${current_price:.2f} P/L={pnl_pct:+.1f}%")
+
+                bars = self.broker.get_bars(symbol, timeframe=Config.TRADING_TIMEFRAME, limit=50)
+
+                # Keine Bars = unbekanntes Risiko = sicherheitshalber verkaufen
+                if bars.empty:
+                    logger.warning(f"[STARTUP] {symbol}: Keine Bars — verkaufe (Sicherheit)")
+                    self._close_with_protection(symbol)
+                    self.learner.record_exit(symbol, current_price, "Startup: keine Marktdaten")
+                    sold.append((symbol, pnl_pct, "Keine Marktdaten verfuegbar"))
+                    continue
+
+                atr = compute_atr(bars)
+
+                # Highest price tracken
+                if symbol not in self.position_highs:
+                    self.position_highs[symbol] = entry_price
+                self.position_highs[symbol] = max(self.position_highs[symbol], current_price)
+
+                # Schritt 1: Harte Exit-Regeln (Stop Loss, Take Profit, Trailing)
+                bay = bayesian.evaluate(bars, prior=0.50)
+                posterior = bay.get("signal", 0.5)
+                exit_decision = self.risk.should_exit(
+                    entry_price=entry_price,
+                    current_price=current_price,
+                    highest_price=self.position_highs[symbol],
+                    atr=atr,
+                    bayesian_posterior=posterior,
+                )
+
+                if exit_decision["should_exit"]:
+                    reason = f"Startup: {exit_decision['reason']}"
+                    logger.info(f"[STARTUP] {symbol}: Harter Exit ausgeloest — {reason}")
+                    self._close_with_protection(symbol)
+                    self.learner.record_exit(symbol, current_price, reason)
+                    sold.append((symbol, pnl_pct, exit_decision["reason"]))
+                    continue
+
+                # Schritt 2: Gemini Startup-Review
+                verdict = self.reasoning.review_existing_position(
+                    symbol=symbol,
+                    entry_price=entry_price,
+                    current_price=current_price,
+                    pnl_pct=pnl_pct,
+                    atr=atr,
+                    regime=self.risk.regime.value,
+                    equity=equity,
+                )
+
+                if verdict["sell"]:
+                    reason = f"Startup Gemini: {verdict['reason']}"
+                    logger.info(f"[STARTUP] {symbol}: Gemini → SELL — {verdict['reason']}")
+                    self._close_with_protection(symbol)
+                    self.learner.record_exit(symbol, current_price, reason)
+                    sold.append((symbol, pnl_pct, f"Gemini: {verdict['reason'][:50]}"))
+                else:
+                    logger.info(f"[STARTUP] {symbol}: Gemini → HOLD — {verdict['reason']}")
+                    held.append((symbol, pnl_pct, f"Gemini: {verdict['reason'][:50]}"))
+
+            except Exception as e:
+                logger.error(f"[STARTUP] {symbol}: Review-Fehler — {e}")
+                errors.append((symbol, str(e)))
+
+        # Telegram Summary
+        lines = ["<b>STARTUP POSITION REVIEW</b>", "━━━━━━━━━━━━━━━━━━━━━━"]
+
+        if sold:
+            lines.append("\n🔴 <b>VERKAUFT:</b>")
+            for sym, pnl, reason in sold:
+                pre = "+" if pnl >= 0 else ""
+                lines.append(f"  • <b>{sym}</b> {pre}{pnl:.1f}% — {reason}")
+
+        if held:
+            lines.append("\n🟢 <b>GEHALTEN:</b>")
+            for sym, pnl, reason in held:
+                pre = "+" if pnl >= 0 else ""
+                lines.append(f"  • <b>{sym}</b> {pre}{pnl:.1f}% — {reason}")
+
+        if errors:
+            lines.append("\n⚠️ <b>FEHLER:</b>")
+            for sym, err in errors:
+                lines.append(f"  • <b>{sym}</b>: {err[:60]}")
+
+        if not sold and not held:
+            lines.append("\nKeine Aktionen noetig.")
+
+        self._tg("\n".join(lines))
 
     def _exit_monitor_loop(self):
         """Separater Thread: prüft offene Positionen alle 3s auf Stop/TP/Trailing."""
@@ -1255,6 +1478,12 @@ class Engine:
         logger.info(f"  Base Watchlist: {Config.WATCHLIST}")
         logger.info(f"  Dynamic Discovery: alle 1h via Gemini")
         logger.info("=" * 60)
+
+        # Startup: Offene Positionen pruefen bevor der normale Scan beginnt
+        try:
+            self.startup_position_review()
+        except Exception as e:
+            logger.error(f"Startup position review fehlgeschlagen: {e}")
 
         # Exit-Monitor-Thread starten (alle 3s unabhängig vom Scan)
         self._stop_event.clear()
