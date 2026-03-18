@@ -274,6 +274,14 @@ class AdaptiveLearner:
             return False
         return True
 
+    def temp_blacklist(self, symbol: str, minutes: int = 15):
+        """Sperrt ein Symbol temporaer fuer X Minuten (z.B. nach manuellem closeall)."""
+        expiry = datetime.now().timestamp() + minutes * 60
+        self.blacklist[symbol] = expiry
+        expiry_dt = datetime.fromtimestamp(expiry).strftime("%H:%M")
+        logger.info(f"[BLACKLIST] {symbol}: Temporaer gesperrt fuer {minutes}min (bis {expiry_dt})")
+        self._save_blacklist()
+
     def get_blacklist_status(self) -> dict:
         """Gibt aktuelle Blacklist fuer Dashboard/Telegram zurueck."""
         now = datetime.now().timestamp()

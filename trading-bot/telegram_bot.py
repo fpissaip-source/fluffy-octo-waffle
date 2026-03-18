@@ -286,8 +286,9 @@ class TradingTelegramBot:
         await update.message.reply_text("🔴 Auto-Scan gestoppt.")
 
     async def cmd_closeall(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Schliesst alle offenen Positionen und startet neuen Scan."""
+        """Schliesst alle offenen Positionen und sperrt sie 15 Minuten."""
         try:
+            from adaptive import AdaptiveLearner
             broker = AlpacaBroker()
             positions = broker.get_positions()
 
@@ -297,18 +298,27 @@ class TradingTelegramBot:
 
             await update.message.reply_text(f"Schliesse {len(positions)} Position(en)...")
 
+            learner = AdaptiveLearner()
             closed = []
             failed = []
             for sym in positions:
                 order_id = broker.close_position(sym)
                 if order_id:
                     closed.append(sym)
+                    learner.temp_blacklist(sym, minutes=15)
                 else:
                     failed.append(sym)
 
-            text = f"✅ Geschlossen: {', '.join(closed)}\n" if closed else ""
+            from datetime import datetime, timedelta
+            unblock_time = (datetime.now() + timedelta(minutes=15)).strftime("%H:%M")
+
+            text = ""
+            if closed:
+                text += f"✅ Geschlossen: {', '.join(closed)}\n"
+                text += f"🔒 Gesperrt bis {unblock_time} (15 Min)\n"
+                text += f"Danach wieder handelbar wenn Signal stark genug."
             if failed:
-                text += f"❌ Fehler: {', '.join(failed)}\n"
+                text += f"\n❌ Fehler: {', '.join(failed)}"
 
             await update.message.reply_text(text.strip())
         except Exception as e:
