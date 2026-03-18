@@ -1479,6 +1479,8 @@ class Engine:
                 f"Gemini: {prob}% — {reasoning['reason']}{risk_str}"
             )
             self._log_scan_attempt(signal, price, reasoning, executed=False)
+            with self._order_lock:
+                self._pending_buys.discard(signal.symbol)
             return None
 
         prob = reasoning.get('probability_pct', round(reasoning['confidence'] * 100))
