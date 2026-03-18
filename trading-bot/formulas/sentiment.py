@@ -99,50 +99,12 @@ class NewsFetcher:
                 return None
 
     def get_news(self, symbol: str, limit: int = 10, hours_back: int = 24) -> list[dict]:
-        """Holt aktuelle News fuer ein Symbol."""
-        end = datetime.now()
-        start = end - timedelta(hours=hours_back)
-
-        def _fetch():
-            return self.api.get_news(
-                symbol=symbol,
-                start=start.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                end=end.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                limit=limit,
-            )
-
-        news = self._fetch_with_timeout(_fetch, timeout=5)
-        if news is None:
-            return []
-
-        articles = []
-        for item in news:
-            articles.append({
-                "headline": item.headline,
-                "summary": getattr(item, "summary", "") or "",
-                "source": getattr(item, "source", "unknown"),
-                "created_at": str(item.created_at),
-                "symbols": getattr(item, "symbols", []),
-            })
-
-        logger.debug(f"{symbol}: {len(articles)} articles found")
-        return articles
+        """Alpaca News API deaktiviert — Gemini übernimmt Sentiment direkt."""
+        return []
 
     def get_market_news(self, limit: int = 15) -> list[dict]:
-        """Holt allgemeine Markt-News (nicht symbol-spezifisch)."""
-        def _fetch():
-            return self.api.get_news(limit=limit)
-
-        news = self._fetch_with_timeout(_fetch, timeout=5)
-        if news is None:
-            return []
-
-        return [{
-            "headline": item.headline,
-            "summary": getattr(item, "summary", "") or "",
-            "source": getattr(item, "source", "unknown"),
-            "created_at": str(item.created_at),
-        } for item in news]
+        """Alpaca News API deaktiviert — Gemini übernimmt Sentiment direkt."""
+        return []
 
 
 # ═══════════════════════════════════════════════════════
