@@ -77,6 +77,28 @@ class AlpacaBroker:
     def has_position(self, symbol: str) -> bool:
         return symbol in self.get_positions()
 
+    def has_open_order(self, symbol: str) -> bool:
+        """True wenn bereits eine offene Buy-Order für dieses Symbol existiert."""
+        try:
+            orders = self.api.list_orders(status="open", symbols=[symbol])
+            return any(o.side == "buy" for o in orders)
+        except Exception:
+            return False
+
+    def cancel_open_buy_orders(self, symbol: str) -> int:
+        """Storniert alle offenen Buy-Orders für ein Symbol. Gibt Anzahl zurück."""
+        try:
+            orders = self.api.list_orders(status="open", symbols=[symbol])
+            cancelled = 0
+            for o in orders:
+                if o.side == "buy":
+                    self.api.cancel_order(o.id)
+                    cancelled += 1
+            return cancelled
+        except Exception as e:
+            logger.warning(f"cancel_open_buy_orders({symbol}): {e}")
+            return 0
+
     def get_bars(self, symbol: str, timeframe: str = "5Min", limit: int = 100) -> pd.DataFrame:
         global _iex_blacklist
 

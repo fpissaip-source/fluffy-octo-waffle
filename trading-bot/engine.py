@@ -1285,6 +1285,17 @@ class Engine:
                 return None
             self._pending_buys.add(signal.symbol)
 
+        # Duplikat-Schutz: offene (noch nicht gefüllte) Buy-Order → stornieren & abbrechen
+        if self.broker.has_open_order(signal.symbol):
+            cancelled = self.broker.cancel_open_buy_orders(signal.symbol)
+            logger.warning(
+                f"{signal.symbol}: {cancelled} offene Buy-Order(s) gefunden und storniert — "
+                f"Duplikat-Bug verhindert"
+            )
+            with self._order_lock:
+                self._pending_buys.discard(signal.symbol)
+            return None
+
         # Risk Manager checks
         positions = self.broker.get_positions()
         if not self.risk.can_open_position(len(positions)):
