@@ -283,6 +283,35 @@ class TradingTelegramBot:
         self.is_paused = False
         await update.message.reply_text("🔴 Auto-Scan gestoppt.")
 
+    async def cmd_closeall(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Schliesst alle offenen Positionen und startet neuen Scan."""
+        try:
+            broker = AlpacaBroker()
+            positions = broker.get_positions()
+
+            if not positions:
+                await update.message.reply_text("Keine offenen Positionen.")
+                return
+
+            await update.message.reply_text(f"Schliesse {len(positions)} Position(en)...")
+
+            closed = []
+            failed = []
+            for sym in positions:
+                order_id = broker.close_position(sym)
+                if order_id:
+                    closed.append(sym)
+                else:
+                    failed.append(sym)
+
+            text = f"✅ Geschlossen: {', '.join(closed)}\n" if closed else ""
+            if failed:
+                text += f"❌ Fehler: {', '.join(failed)}\n"
+
+            await update.message.reply_text(text.strip())
+        except Exception as e:
+            await update.message.reply_text(f"Error: {e}")
+
     async def cmd_regime(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Zeigt aktuelles Markt-Regime und Risk-Parameter."""
         try:
@@ -602,6 +631,7 @@ Antworte NUR mit JSON:
         self.app.add_handler(CommandHandler("weights", self.cmd_weights))
         self.app.add_handler(CommandHandler("sentiment", self.cmd_sentiment))
         self.app.add_handler(CommandHandler("screener", self.cmd_screener))
+        self.app.add_handler(CommandHandler("closeall", self.cmd_closeall))
 
         logger.info("Telegram bot running. Send /start to begin.")
         self.app.run_polling(drop_pending_updates=True)
