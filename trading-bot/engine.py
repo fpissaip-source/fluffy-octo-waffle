@@ -825,6 +825,7 @@ class Engine:
         self.watchlist.notify = self._tg   # Telegram-Callback für Favoriten-Alerts
         self.spike_sensor = SpikeSensor(self.broker)
         self.trade_log: list[TradeSignal] = []
+        self.scan_attempts: list[dict] = []   # Alle Scan-Versuche (auch abgelehnte)
         self.position_highs: dict[str, float] = {}
         self._async_threads: list[threading.Thread] = []
         self._exit_lock = threading.Lock()
@@ -1179,7 +1180,58 @@ class Engine:
             if price > 0:
                 signal.qty = max(1, int(bet_size / price))
 
+        # ── Scan-Versuch loggen (auch Perception-Layer-Ablehnungen) ──
+        if not signal.all_passed:
+            passed = [n for n, r in signal.results.items() if r["passed"]]
+            failed = [n for n, r in signal.results.items() if not r["passed"]]
+            self.scan_attempts.append({
+                "timestamp": datetime.now().isoformat(),
+                "symbol": symbol,
+                "price": float(bars["close"].iloc[-1]) if not bars.empty else 0,
+                "cascade_level": signal.cascade_level,
+                "cascade_label": signal.cascade_label or "—",
+                "regime": self.risk.regime.value,
+                "decision": "ABGELEHNT (Filter)",
+                "gemini_used": False,
+                "reason": signal.reason,
+                "passed": passed,
+                "failed": failed,
+                "probability_pct": None,
+                "risk_factors": [],
+            })
+            # Max 50 Eintraege behalten
+            if len(self.scan_attempts) > 50:
+                self.scan_attempts = self.scan_attempts[-50:]
+
         return signal
+
+    def _log_scan_attempt(self, signal: TradeSignal, price: float, reasoning: dict, executed: bool):
+        """Loggt jeden Gemini-Versuch (abgelehnt oder ausgefuehrt) in scan_attempts."""
+        passed = [n for n, r in signal.results.items() if r["passed"]]
+        failed = [n for n, r in signal.results.items() if not r["passed"]]
+        if executed:
+            decision = "AUSGEFUEHRT"
+        elif reasoning.get("raw_response") in ("FALLBACK", "EXPRESS_LANE"):
+            decision = "FALLBACK (kein Gemini)"
+        else:
+            decision = "ABGELEHNT (Gemini)"
+        self.scan_attempts.append({
+            "timestamp": datetime.now().isoformat(),
+            "symbol": signal.symbol,
+            "price": price,
+            "cascade_level": signal.cascade_level,
+            "cascade_label": signal.cascade_label or "—",
+            "regime": self.risk.regime.value,
+            "decision": decision,
+            "gemini_used": True,
+            "reason": reasoning.get("reason", ""),
+            "passed": passed,
+            "failed": failed,
+            "probability_pct": reasoning.get("probability_pct"),
+            "risk_factors": reasoning.get("risk_factors", []),
+        })
+        if len(self.scan_attempts) > 50:
+            self.scan_attempts = self.scan_attempts[-50:]
 
     def execute_signal(self, signal: TradeSignal) -> Optional[str]:
         if not signal.all_passed or signal.action != "BUY":
@@ -1273,6 +1325,7 @@ class Engine:
             )
             if reasoning["risk_factors"]:
                 logger.warning(f"  Risiken: {', '.join(reasoning['risk_factors'])}")
+            self._log_scan_attempt(signal, price, reasoning, executed=False)
             return None
 
         logger.info(f"{'=' * 40}")
@@ -1319,6 +1372,7 @@ class Engine:
             signal.reason += f" -> Order {order_id}"
             self.trade_log.append(signal)
             self.position_highs[signal.symbol] = price
+            self._log_scan_attempt(signal, price, reasoning, executed=True)
 
             # ── ORDER PLACED Telegram Alert ──
             order_type = "LIMIT" if (signal.results.get("Stoikov", {}).get("passed") and

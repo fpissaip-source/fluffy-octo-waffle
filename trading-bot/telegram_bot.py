@@ -331,7 +331,7 @@ class TradingTelegramBot:
         import json
         import numpy as np
         from pathlib import Path
-        from adaptive import AUTOPSY_DIR, TRADE_LOG_FILE, TradeRecord
+        from adaptive import TRADE_LOG_FILE, TradeRecord
 
         await update.message.reply_text("Analysiere...")
 
@@ -373,54 +373,51 @@ class TradingTelegramBot:
 
         await update.message.reply_text(msg1, parse_mode="HTML")
 
-        # ── 2. LETZTE 2 TRADE-VERSUCHE (AUTOPSY) ────────────
+        # ── 2. LETZTE 2 SCAN-VERSUCHE (alle, auch abgelehnte) ────────────
         try:
-            autopsy_files = sorted(
-                Path(AUTOPSY_DIR).glob("*.json"),
-                key=lambda f: f.stat().st_mtime,
-                reverse=True
-            )[:2]
+            attempts = []
+            if self.engine and hasattr(self.engine, "scan_attempts"):
+                attempts = self.engine.scan_attempts[-2:]
 
-            if autopsy_files:
-                parts = ["<b>2. LETZTE 2 TRADE-VERSUCHE</b>\n━━━━━━━━━━━━━━━━━━━━━━"]
-                for i, af in enumerate(autopsy_files, 1):
-                    with open(af) as f:
-                        a = json.load(f)
-
+            if attempts:
+                parts = ["<b>2. LETZTE 2 SCAN-VERSUCHE</b>\n━━━━━━━━━━━━━━━━━━━━━━"]
+                for i, a in enumerate(reversed(attempts), 1):
                     ts = str(a.get("timestamp", "?"))[:16].replace("T", " ")
                     sym = a.get("symbol", "?")
-                    approved = a.get("gemini_approved", False)
-                    prob = a.get("gemini_probability_pct", "?")
-                    reason = str(a.get("gemini_reason", "?"))[:120]
+                    decision = a.get("decision", "?")
+                    prob = a.get("probability_pct")
+                    reason = str(a.get("reason", "?"))[:150]
                     regime = a.get("regime", "?")
                     cascade = a.get("cascade_level", "?")
-                    risk_factors = a.get("gemini_risk_factors", [])
-                    price = a.get("price", 0)
-                    vix = a.get("vix")
+                    risk_factors = a.get("risk_factors", [])
+                    price_val = a.get("price", 0)
+                    passed = a.get("passed", [])
+                    failed = a.get("failed", [])
 
-                    formulas = a.get("formula_results", {})
-                    passed = [n for n, r in formulas.items() if r.get("passed")]
-                    failed = [n for n, r in formulas.items() if not r.get("passed")]
+                    if "AUSGEFUEHRT" in decision:
+                        d_icon = "✅"
+                    elif "ABGELEHNT" in decision:
+                        d_icon = "🚫"
+                    else:
+                        d_icon = "⚠️"
 
-                    decision_icon = "✅ AUSGEFUEHRT" if approved else "🚫 ABGELEHNT"
+                    prob_text = f"{prob}%  |  " if prob is not None else ""
                     rf_text = ", ".join(risk_factors) if risk_factors else "keine"
-                    vix_text = f" | VIX: {vix:.1f}" if vix else ""
 
                     parts.append(
-                        f"\n<b>#{i}: {sym}</b> @ ${price:.2f} — {ts}\n"
-                        f"Entscheidung: {decision_icon}\n"
-                        f"Wahrsch.: {prob}%  |  Kaskade: {cascade}/7\n"
-                        f"Regime: {regime}{vix_text}\n"
-                        f"Grund: {reason}\n"
+                        f"\n<b>#{i}: {sym}</b> @ ${price_val:.2f} — {ts}\n"
+                        f"{d_icon} {decision}\n"
+                        f"{prob_text}Kaskade: {cascade}/7  |  Regime: {regime}\n"
+                        f"Grund: <i>{reason}</i>\n"
                         f"✅ {', '.join(passed) or 'keine'}\n"
                         f"❌ {', '.join(failed) or 'keine'}\n"
                         f"Risiko: {rf_text}"
                     )
                 msg2 = "\n".join(parts)
             else:
-                msg2 = "<b>2. LETZTE 2 TRADE-VERSUCHE</b>\n━━━━━━━━━━━━━━━━━━━━━━\nNoch keine Autopsy-Daten."
+                msg2 = "<b>2. LETZTE 2 SCAN-VERSUCHE</b>\n━━━━━━━━━━━━━━━━━━━━━━\nNoch keine Scan-Daten (Bot muss laufen)."
         except Exception as e:
-            msg2 = f"<b>2. LETZTE 2 TRADE-VERSUCHE</b>\nFehler: {e}"
+            msg2 = f"<b>2. LETZTE 2 SCAN-VERSUCHE</b>\nFehler: {e}"
 
         await update.message.reply_text(msg2, parse_mode="HTML")
 
