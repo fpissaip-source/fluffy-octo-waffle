@@ -927,12 +927,10 @@ class Engine:
 
             # ── Vollständige Neubewertung vor Queue-Kauf ──
             logger.info(f"[QUEUE FLUSH] Prüfe Kandidat {symbol} erneut durch alle Layer...")
-            self._tg(f"🔄 <b>Queue-Check:</b> {symbol} wird nochmal geprüft...")
             try:
                 new_signal = self.analyze_symbol(symbol)
                 if new_signal is None:
                     logger.info(f"[QUEUE FLUSH] {symbol}: Signal nicht mehr gültig — aus Queue entfernt")
-                    self._tg(f"❌ <b>Queue-Kandidat veraltet:</b> {symbol} — Signal zu schwach, kein Kauf")
                     bought.append(symbol)  # aus Queue entfernen
                     continue
             except Exception as e:
@@ -1471,13 +1469,6 @@ class Engine:
             if reasoning["risk_factors"]:
                 print(f"  > RISIKEN: {', '.join(reasoning['risk_factors'])}")
             print(f"{'=' * 60}\n")
-            risk_str = f"\nRisiken: {', '.join(reasoning['risk_factors'])}" if reasoning["risk_factors"] else ""
-            self._tg(
-                f"🚫 <b>GEMINI: HOLD — {signal.symbol}</b>\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"Kaskade: <b>{signal.cascade_label}</b>\n"
-                f"Gemini: {prob}% — {reasoning['reason']}{risk_str}"
-            )
             self._log_scan_attempt(signal, price, reasoning, executed=False)
             with self._order_lock:
                 self._pending_buys.discard(signal.symbol)
