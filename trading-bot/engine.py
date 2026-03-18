@@ -1611,7 +1611,9 @@ class Engine:
                 # ATR berechnen
                 atr = compute_atr(bars)
                 entry_price = pos["avg_entry"]
-                current_price = bars["close"].iloc[-1]
+                # Echtzeit-Preis für Stop-Loss/TP-Prüfung (nicht Bar-Close der veraltet sein kann)
+                live_price = self.broker.get_latest_price(symbol)
+                current_price = live_price if live_price and live_price > 0 else bars["close"].iloc[-1]
 
                 # Highest price tracken (fuer Trailing Stop)
                 if symbol not in self.position_highs:
