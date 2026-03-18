@@ -1091,7 +1091,13 @@ class Engine:
 
         bars = self.broker.get_bars(symbol, timeframe=Config.TRADING_TIMEFRAME, limit=Config.LOOKBACK_BARS)
         if bars.empty or len(bars) < 50:
-            logger.warning(f"{symbol}: Not enough data ({len(bars) if not bars.empty else 0} bars)")
+            bars_count = len(bars) if not bars.empty else 0
+            logger.warning(f"{symbol}: Not enough data ({bars_count} bars)")
+            # ── Auto-Remove delisted Symbole ──
+            if bars_count == 0 and symbol in Config.WATCHLIST:
+                Config.WATCHLIST.remove(symbol)
+                logger.warning(f"[WATCHLIST] {symbol}: 0 Bars — vermutlich delisted. Automatisch entfernt.")
+                self._tg(f"🗑 <b>{symbol}</b> automatisch von Watchlist entfernt (keine Kursdaten — vermutlich delisted)")
             signal.reason = "Insufficient data"
             return signal
 
