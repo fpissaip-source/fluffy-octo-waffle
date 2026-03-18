@@ -75,6 +75,10 @@ class SpikeSensor:
         "MGTX", "RAPT", "NRIX", "PRAX", "FOLD",
         # ── Micro Cap (handelbar via Alpaca) ───────────────────
         "TNXP", "JAGX", "LGVN", "TPVG",
+        # ── Penny Stocks / Sub-$5 ──────────────────────────────
+        "DVLT", "ABAT", "EZFL", "NCPL", "CENN", "FFIE", "PNPL",
+        "KULR", "CRKN", "AEYE", "AEAC", "MDJH", "CBAT", "PPSI",
+        "ALBT", "HCDI", "CISO", "GFAI", "EVGO", "NAOV", "NXPL",
     ]
 
     def __init__(self, broker: "AlpacaBroker"):
@@ -164,8 +168,8 @@ class SpikeSensor:
                 vol_mult = volume / avg_vol if avg_vol > 0 else 1.0
                 self._avg_volumes[symbol] = avg_vol * 0.9 + volume * 0.1
 
-                # Penny-Stocks filtern
-                if close < 2.0 or volume < 100_000:
+                # Micro-Cap Filter: unter $0.50 oder unter 50k Volumen → zu illiquide
+                if close < 0.50 or volume < 50_000:
                     return
 
                 is_spike = abs(pct_move) >= self.min_pct or vol_mult >= self.min_vol_mult
@@ -210,8 +214,8 @@ class SpikeSensor:
                     volume = int(daily.volume)
                     if open_p <= 0 or close_p <= 0:
                         continue
-                    # Penny-Stocks filtern: unter $2 oder unter 100k Volumen → kein IEX-Daten
-                    if close_p < 2.0 or volume < 100_000:
+                    # Micro-Cap Filter: unter $0.50 oder unter 50k Volumen → zu illiquide
+                    if close_p < 0.50 or volume < 50_000:
                         continue
                     pct_move = (close_p - open_p) / open_p
                     avg_vol = self._avg_volumes.get(symbol, volume)

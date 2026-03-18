@@ -10,6 +10,12 @@ import alpaca_trade_api as tradeapi
 import pandas as pd
 import numpy as np
 
+try:
+    import yfinance as yf
+    _YFINANCE_AVAILABLE = True
+except ImportError:
+    _YFINANCE_AVAILABLE = False
+
 from config import Config
 
 logger = logging.getLogger("bot.broker")
@@ -122,15 +128,58 @@ class AlpacaBroker:
             return pd.DataFrame()
 
         if bars.empty:
-            logger.warning(f"No bars for {symbol} — zur Blacklist hinzugefügt")
+            logger.warning(f"No bars for {symbol} via IEX — versuche yfinance Fallback")
             _iex_blacklist.add(symbol)
-            return pd.DataFrame()
+            return self._get_bars_yfinance(symbol, timeframe, limit)
 
         bars = bars.tail(limit).copy()
         bars["returns"] = bars["close"].pct_change()
         bars["log_returns"] = np.log(bars["close"] / bars["close"].shift(1))
         bars.dropna(inplace=True)
         return bars
+
+    def _get_bars_yfinance(self, symbol: str, timeframe: str = "1Hour", limit: int = 100) -> pd.DataFrame:
+        """Fallback: Bars via Yahoo Finance wenn IEX keine Daten liefert."""
+        if not _YFINANCE_AVAILABLE:
+            logger.warning(f"yfinance nicht installiert — kein Fallback für {symbol}")
+            return pd.DataFrame()
+
+        tf_map = {
+            "1Min": "1m", "5Min": "5m", "15Min": "15m",
+            "1Hour": "1h", "1Day": "1d",
+        }
+        yf_interval = tf_map.get(timeframe, "1h")
+
+        # Zeitraum: genug History für limit Bars
+        period_map = {
+            "1m": "7d", "5m": "60d", "15m": "60d",
+            "1h": "730d", "1d": "2y",
+        }
+        period = period_map.get(yf_interval, "60d")
+
+        try:
+            ticker = yf.Ticker(symbol)
+            raw = ticker.history(period=period, interval=yf_interval, auto_adjust=True)
+            if raw.empty:
+                logger.warning(f"yfinance: Keine Daten für {symbol}")
+                return pd.DataFrame()
+
+            bars = raw.rename(columns={
+                "Open": "open", "High": "high", "Low": "low",
+                "Close": "close", "Volume": "volume",
+            })[["open", "high", "low", "close", "volume"]].copy()
+
+            bars = bars.tail(limit)
+            bars["returns"] = bars["close"].pct_change()
+            bars["log_returns"] = np.log(bars["close"] / bars["close"].shift(1))
+            bars.dropna(inplace=True)
+
+            logger.info(f"[yfinance] {symbol}: {len(bars)} Bars geladen (Fallback)")
+            return bars
+
+        except Exception as e:
+            logger.warning(f"yfinance Fallback fehlgeschlagen für {symbol}: {e}")
+            return pd.DataFrame()
 
     def _get_crypto_price(self, symbol: str) -> Optional[float]:
         """Crypto-Preis via letztem 1-Minuten-Bar (get_latest_crypto_trade nicht verfügbar)."""
