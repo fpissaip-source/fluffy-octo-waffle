@@ -18,6 +18,33 @@ from config import Config
 from engine import Engine
 from broker import AlpacaBroker
 
+_LOCK_FILE = "/tmp/trading_bot.pid"
+
+
+def _acquire_lock():
+    """Ensure only one bot instance runs. Exit if another is already running."""
+    if os.path.exists(_LOCK_FILE):
+        try:
+            with open(_LOCK_FILE) as f:
+                pid = int(f.read().strip())
+            # Check if process is still alive
+            os.kill(pid, 0)
+            print(f"\n  FEHLER: Bot laeuft bereits (PID {pid})!")
+            print(f"  Stoppe die andere Instanz zuerst, oder loesche {_LOCK_FILE}\n")
+            sys.exit(1)
+        except (ProcessLookupError, ValueError):
+            pass  # Stale lock file — process no longer running
+
+    with open(_LOCK_FILE, "w") as f:
+        f.write(str(os.getpid()))
+
+
+def _release_lock():
+    try:
+        os.remove(_LOCK_FILE)
+    except FileNotFoundError:
+        pass
+
 
 def setup_logging():
     level = getattr(logging, Config.LOG_LEVEL.upper(), logging.INFO)
@@ -83,6 +110,10 @@ def main():
     args = parser.parse_args()
 
     setup_logging()
+    _acquire_lock()
+
+    import atexit
+    atexit.register(_release_lock)
 
     if not Config.validate():
         print("\n  API Keys nicht konfiguriert!")
