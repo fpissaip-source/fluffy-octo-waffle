@@ -57,6 +57,7 @@ class ReasoningLayer:
         self.model = Config.REASONING_MODEL
         self.min_confidence = Config.REASONING_MIN_CONFIDENCE
         self.market_ctx = MarketContext()
+        self._learner: Optional["AdaptiveLearner"] = None  # wird von Engine gesetzt
         logger.info(f"ReasoningLayer initialisiert: {self.model} (min_confidence={self.min_confidence})")
 
     def _cascade_fallback(self, symbol: str, cascade_level: int, reason: str) -> dict:
@@ -122,6 +123,15 @@ class ReasoningLayer:
         market_context_str = self.market_ctx.format_for_prompt(symbol)
         cascade_info = f"{signal.cascade_label}" if signal.cascade_level else "unbekannt"
 
+        # ── Learning Summary aus Autopsy-Analyse injizieren ──
+        learning_summary = ""
+        if self._learner is not None:
+            learning_summary = self._learner.get_learning_summary()
+        learning_section = (
+            f"\nSYSTEM-LERNMUSTER (aus vergangenen Trades automatisch erkannt):\n{learning_summary}\n"
+            if learning_summary else ""
+        )
+
         prompt = f"""Du bist ein erfahrener quantitativer Trader. Analysiere dieses Trading-Signal und triff eine finale Kaufentscheidung.
 
 SYMBOL: {symbol}
@@ -142,7 +152,7 @@ SENTIMENT-ANALYSE:
 
 ECHTZEIT MARKT-KONTEXT:
 {market_context_str}
-
+{learning_section}
 POSITION:
   - Groesse: ~{signal.qty} Aktien (~${signal.qty * price:,.0f})
   - Risiko: {(signal.qty * price / equity * 100):.1f}% des Depots
@@ -150,6 +160,7 @@ POSITION:
 Deine Aufgabe: Gib eine Gewinnwahrscheinlichkeit in % (0-100) und entscheide BUY oder HOLD.
 Bei 7/7 Filtern: hohe Wahrscheinlichkeit erwartet. Bei 4/7: konservativ sein.
 Beruecksichtige: Kaskaden-Level, VIX, Sektor-Trend, Sentiment, Positionsgroesse.
+Wenn die System-Lernmuster aehnliche Muster als problematisch markieren, sei konservativer.
 
 Antworte NUR mit JSON:
 {{"decision": "BUY" oder "HOLD", "probability_pct": 0-100, "confidence": 0.0-1.0, "reason": "ein Satz auf Deutsch", "risk_factors": ["Faktor1", "Faktor2"]}}"""
@@ -790,6 +801,8 @@ class Engine:
         self.risk = RiskManager()
         self.learner = AdaptiveLearner()
         self.reasoning = ReasoningLayer()
+        # ReasoningLayer bekommt Zugang zum AdaptiveLearner fuer Learning-Summary
+        self.reasoning._learner = self.learner
         self.watchlist = WatchlistDiscovery(self.broker)
         self.watchlist.notify = self._tg   # Telegram-Callback für Favoriten-Alerts
         self.spike_sensor = SpikeSensor(self.broker)
@@ -1163,6 +1176,15 @@ class Engine:
             logger.warning(f"{signal.symbol}: EARNINGS BLACKOUT — Trade blockiert")
             return None
 
+        # ── Auto-Blacklist: 2x Stop-Loss in 48h → 7 Tage gesperrt ──────────
+        if self.learner.is_blacklisted(signal.symbol):
+            status = self.learner.get_blacklist_status().get(signal.symbol, {})
+            logger.warning(
+                f"{signal.symbol}: BLACKLISTED — gesperrt bis {status.get('expiry', '?')} "
+                f"({status.get('remaining_h', '?')}h verbleibend)"
+            )
+            return None
+
         # Kein doppelter Buy wenn bereits eine Order oder Position laeuft
         with self._order_lock:
             if signal.symbol in self._pending_buys:
@@ -1417,11 +1439,39 @@ class Engine:
             except Exception as e:
                 logger.error(f"Exit check error {symbol}: {e}")
 
+    def _refresh_learning_summary_async(self):
+        """
+        Generiert die Learning-Summary im Hintergrund-Thread.
+        Wird von scan_once() alle 2h ausgeloest wenn genug Daten vorhanden.
+        """
+        def _run():
+            try:
+                summary = self.learner.generate_learning_summary(self.reasoning.client)
+                if summary:
+                    logger.info("[LEARNING] Summary aktualisiert — wird in naechste Gemini-Prompts injiziert")
+                    # Telegram-Notification
+                    first_line = summary.split("\n")[0][:80] if summary else ""
+                    self._tg(
+                        f"🧠 <b>Bot-Lernupdate</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"<i>{first_line}...</i>"
+                    )
+            except Exception as e:
+                logger.error(f"[LEARNING] Hintergrund-Refresh fehlgeschlagen: {e}")
+
+        t = threading.Thread(target=_run, daemon=True, name="learning-summary")
+        t.start()
+        self._async_threads.append(t)
+
     def scan_once(self, market_status: str) -> list[str]:
         """
         Scannt aktive Watchlist + Spike-Sensor Universum.
         Gibt Liste der erkannten Spike-Symbole zurück (für Telegram-Alerts).
         """
+        # ── Learning Summary periodisch aktualisieren (alle 2h) ──
+        if self.learner.should_refresh_learning_summary():
+            self._refresh_learning_summary_async()
+
         # Regime EINMAL global updaten (SPY = Marktproxy) — nicht per Symbol
         try:
             spy_bars = self.broker.get_bars("SPY", timeframe="5Min", limit=30)

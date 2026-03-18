@@ -120,6 +120,17 @@ class TradingTelegramBot:
             mode = "PAPER" if Config.is_paper() else "LIVE"
             bot_status = "PAUSED" if self.is_paused else "RUNNING" if self.is_running else "IDLE"
 
+            # Blacklist-Status
+            blacklist_section = ""
+            if self.engine:
+                bl = self.engine.learner.get_blacklist_status()
+                if bl:
+                    bl_lines = "\n".join(
+                        f"  • <b>{sym}</b> — noch {info['remaining_h']}h gesperrt"
+                        for sym, info in bl.items()
+                    )
+                    blacklist_section = f"━━━━━━━━━━━━━━━━━━━━━━\n🚫 <b>Gesperrte Symbole ({len(bl)}):</b>\n{bl_lines}\n"
+
             text = (
                 f"<b>ACCOUNT STATUS</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -131,6 +142,7 @@ class TradingTelegramBot:
                 f"Cash:         ${cash:,.2f}\n"
                 f"Buying Power: ${bp:,.2f}\n"
                 f"Positions:    {len(positions)}\n"
+                + blacklist_section
             )
             await update.message.reply_text(text, parse_mode="HTML")
         except Exception as e:

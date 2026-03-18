@@ -33,6 +33,9 @@ DATA_DIR = Path(__file__).parent / "data"
 TRADE_LOG_FILE = DATA_DIR / "trade_history.json"
 WEIGHTS_FILE = DATA_DIR / "formula_weights.json"
 AUTOPSY_DIR = Path(__file__).parent / "autopsy"
+BLACKLIST_FILE = DATA_DIR / "blacklist.json"
+SL_EVENTS_FILE = DATA_DIR / "sl_events.json"
+LEARNING_SUMMARY_FILE = DATA_DIR / "learning_summary.json"
 
 
 # ═══════════════════════════════════════════════════════
@@ -147,7 +150,21 @@ class AdaptiveLearner:
         self.min_trades_to_learn = 10  # Mindestens 10 Trades bevor angepasst wird
         self.max_history = 500  # Max Trades im Speicher
 
+        # ── Auto-Blacklist ──────────────────────────────
+        # {symbol: [unix_timestamp, ...]} — Stop-Loss Ereignisse
+        self.sl_events: dict[str, list[float]] = {}
+        # {symbol: unix_timestamp_expiry} — geblockte Symbole
+        self.blacklist: dict[str, float] = {}
+        self.sl_blacklist_window_h = 48    # Fenster in dem 2x SL zählt
+        self.sl_blacklist_duration_d = 7   # Sperre in Tagen
+
+        # ── Learning Summary (Gemini Autopsy-Feedback) ──
+        self._learning_summary: str = ""
+        self._learning_summary_updated: float = 0
+        self.learning_summary_ttl_h = 2    # Alle 2h neu generieren
+
         self._load()
+        self._load_blacklist()
 
     # ── Persistenz ──────────────────────────────────────
 
@@ -188,6 +205,236 @@ class AdaptiveLearner:
         except Exception as e:
             logger.error(f"Save failed: {e}")
 
+    # ── Blacklist Persistenz ─────────────────────────────
+
+    def _load_blacklist(self):
+        """Laedt Blacklist und SL-Events von Disk."""
+        try:
+            if BLACKLIST_FILE.exists():
+                with open(BLACKLIST_FILE) as f:
+                    data = json.load(f)
+                self.blacklist = data.get("blacklist", {})
+                self.sl_events = data.get("sl_events", {})
+                # Abgelaufene Eintraege bereinigen
+                now = datetime.now().timestamp()
+                self.blacklist = {s: exp for s, exp in self.blacklist.items() if exp > now}
+                logger.info(f"[BLACKLIST] Geladen: {len(self.blacklist)} gesperrte Symbole")
+        except Exception as e:
+            logger.warning(f"[BLACKLIST] Laden fehlgeschlagen: {e}")
+
+    def _save_blacklist(self):
+        """Speichert Blacklist und SL-Events auf Disk."""
+        try:
+            with open(BLACKLIST_FILE, "w") as f:
+                json.dump({"blacklist": self.blacklist, "sl_events": self.sl_events}, f, indent=2)
+        except Exception as e:
+            logger.error(f"[BLACKLIST] Speichern fehlgeschlagen: {e}")
+
+    # ── Auto-Blacklist Logik ─────────────────────────────
+
+    def record_stop_loss(self, symbol: str):
+        """
+        Registriert ein Stop-Loss Ereignis fuer ein Symbol.
+        Wenn 2x Stop-Loss in 48h → Symbol fuer 7 Tage gesperrt.
+        """
+        now = datetime.now().timestamp()
+        window = self.sl_blacklist_window_h * 3600
+
+        # SL-Events speichern (nur die letzten 48h behalten)
+        events = self.sl_events.get(symbol, [])
+        events = [t for t in events if now - t < window]
+        events.append(now)
+        self.sl_events[symbol] = events
+
+        logger.info(f"[BLACKLIST] {symbol}: Stop-Loss #{len(events)} in {self.sl_blacklist_window_h}h")
+
+        if len(events) >= 2:
+            expiry = now + self.sl_blacklist_duration_d * 86400
+            self.blacklist[symbol] = expiry
+            expiry_dt = datetime.fromtimestamp(expiry).strftime("%Y-%m-%d %H:%M")
+            logger.warning(
+                f"[BLACKLIST] {symbol}: 2x Stop-Loss in {self.sl_blacklist_window_h}h "
+                f"→ GESPERRT bis {expiry_dt}"
+            )
+            self._save_blacklist()
+            return True  # Neu gesperrt
+
+        self._save_blacklist()
+        return False
+
+    def is_blacklisted(self, symbol: str) -> bool:
+        """Prueft ob ein Symbol gesperrt ist (auto-expire beachten)."""
+        if symbol not in self.blacklist:
+            return False
+        now = datetime.now().timestamp()
+        if self.blacklist[symbol] <= now:
+            del self.blacklist[symbol]
+            self._save_blacklist()
+            logger.info(f"[BLACKLIST] {symbol}: Sperre abgelaufen — wieder handelbar")
+            return False
+        return True
+
+    def get_blacklist_status(self) -> dict:
+        """Gibt aktuelle Blacklist fuer Dashboard/Telegram zurueck."""
+        now = datetime.now().timestamp()
+        active = {}
+        for sym, expiry in self.blacklist.items():
+            if expiry > now:
+                remaining_h = (expiry - now) / 3600
+                active[sym] = {
+                    "expiry": datetime.fromtimestamp(expiry).strftime("%Y-%m-%d %H:%M"),
+                    "remaining_h": round(remaining_h, 1),
+                }
+        return active
+
+    # ── Learning Summary (Gemini liest Autopsies) ────────
+
+    def get_learning_summary(self) -> str:
+        """
+        Gibt die gecachte Lern-Zusammenfassung zurueck.
+        Wird von ReasoningLayer in den approve_trade Prompt injiziert.
+        Leer wenn noch keine Zusammenfassung generiert wurde.
+        """
+        if LEARNING_SUMMARY_FILE.exists() and not self._learning_summary:
+            try:
+                with open(LEARNING_SUMMARY_FILE) as f:
+                    data = json.load(f)
+                self._learning_summary = data.get("summary", "")
+                self._learning_summary_updated = data.get("updated", 0)
+            except Exception:
+                pass
+        return self._learning_summary
+
+    def should_refresh_learning_summary(self) -> bool:
+        """Prueft ob die Lern-Zusammenfassung aktualisiert werden soll."""
+        import time
+        ttl = self.learning_summary_ttl_h * 3600
+        return (time.time() - self._learning_summary_updated) > ttl
+
+    def generate_learning_summary(self, gemini_client) -> str:
+        """
+        Gemini analysiert die letzten Autopsy-JSONs + Trade-History
+        und erstellt eine kompakte Zusammenfassung der Lernmuster.
+
+        Fokus:
+        - Welche Setups haben verloren? (insbesondere Latenz-Probleme)
+        - Welche Chart-Muster sollten vermieden werden (Yahoo-Fallback)?
+        - Welche Formeln haben in welchem Regime gut/schlecht performt?
+
+        Wird alle 2h neu generiert und gecacht.
+        Ergebnis wird in approve_trade-Prompt injiziert.
+        """
+        import time
+
+        closed_trades = [t for t in self.trade_history if t.exit_price is not None]
+        if len(closed_trades) < 3:
+            logger.info("[LEARNING] Zu wenig abgeschlossene Trades fuer Zusammenfassung")
+            return ""
+
+        # Letzte 30 Trades fuer Analyse
+        recent = closed_trades[-30:]
+
+        # Autopsy-Dateien der letzten Trades einlesen
+        autopsy_data = []
+        try:
+            autopsy_files = sorted(AUTOPSY_DIR.glob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True)
+            for f in autopsy_files[:20]:
+                try:
+                    with open(f) as af:
+                        autopsy_data.append(json.load(af))
+                except Exception:
+                    continue
+        except Exception as e:
+            logger.warning(f"[LEARNING] Autopsy-Dateien lesen fehlgeschlagen: {e}")
+
+        # Trade-Zusammenfassung erstellen
+        trade_lines = []
+        for t in recent:
+            pnl_str = f"{t.pnl_pct:+.2%}"
+            outcome = "GEWINN" if t.pnl_pct > 0 else "VERLUST"
+            trade_lines.append(
+                f"- {t.symbol} [{t.regime}] {pnl_str} ({outcome}) "
+                f"Grund: {t.exit_reason or 'unbekannt'}"
+            )
+
+        trades_text = "\n".join(trade_lines) if trade_lines else "Keine abgeschlossenen Trades"
+
+        # Autopsy-Zusammenfassung (nur Verluste mit Details)
+        autopsy_lines = []
+        for a in autopsy_data[:10]:
+            sym = a.get("symbol", "?")
+            regime = a.get("regime", "?")
+            formulas = a.get("formula_results", {})
+            failed = [n for n, r in formulas.items() if not r.get("passed")]
+            # Passenden Trade in History finden
+            matching = [t for t in recent if t.symbol == sym and t.pnl_pct < 0]
+            if matching:
+                worst = min(matching, key=lambda t: t.pnl_pct)
+                autopsy_lines.append(
+                    f"- {sym} [{regime}]: Verlust {worst.pnl_pct:+.2%} | "
+                    f"Fehlgeschlagen: {', '.join(failed) or 'keine'} | "
+                    f"Grund: {worst.exit_reason or '?'}"
+                )
+
+        autopsy_text = "\n".join(autopsy_lines) if autopsy_lines else "Keine Verlust-Autopsien"
+
+        # Statistiken
+        wins = [t for t in recent if t.pnl_pct > 0]
+        losses = [t for t in recent if t.pnl_pct <= 0]
+        sl_losses = [t for t in losses if "STOP LOSS" in (t.exit_reason or "")]
+
+        prompt = f"""Du bist ein quantitativer Trading-Analyst. Analysiere die folgenden letzten Trades und erstelle eine KOMPAKTE Lern-Zusammenfassung (max. 8 Sätze auf Deutsch).
+
+TRADING-STATISTIK (letzte {len(recent)} Trades):
+- Gewinne: {len(wins)} | Verluste: {len(losses)}
+- Avg Gewinn: {sum(t.pnl_pct for t in wins)/len(wins):.2%} | Avg Verlust: {sum(t.pnl_pct for t in losses)/len(losses):.2%}
+- Stop-Loss-Auslösungen: {len(sl_losses)}
+
+LETZTE TRADES:
+{trades_text}
+
+VERLUST-AUTOPSIEN:
+{autopsy_text}
+
+ANALYSE-AUFGABEN:
+1. Welche Muster führen zu Verlusten? (besonders: Momentum-Trades bei Penny-Stocks mit yfinance-Verzögerung)
+2. Welche Symbole/Setups sollten in Zukunft gemieden werden?
+3. In welchen Regimen funktioniert was gut/schlecht?
+4. Gibt es Anzeichen dass Verluste durch 15-Minuten Datenverzögerung entstanden sind?
+
+Antworte mit einer kompakten Zusammenfassung die direkt in zukünftige Trading-Entscheidungen einfließen kann. Kein JSON — nur klarer Text."""
+
+        try:
+            from google.genai import types as genai_types
+            response = gemini_client.models.generate_content(
+                model=Config.REASONING_MODEL,
+                contents=prompt,
+                config=genai_types.GenerateContentConfig(
+                    temperature=0.2,
+                    max_output_tokens=500,
+                    thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
+                ),
+            )
+            summary = response.text or ""
+            self._learning_summary = summary
+            self._learning_summary_updated = time.time()
+
+            # Auf Disk speichern
+            with open(LEARNING_SUMMARY_FILE, "w") as f:
+                json.dump({
+                    "summary": summary,
+                    "updated": self._learning_summary_updated,
+                    "updated_at": datetime.now().isoformat(),
+                    "trades_analyzed": len(recent),
+                }, f, indent=2, ensure_ascii=False)
+
+            logger.info(f"[LEARNING] Neue Zusammenfassung generiert ({len(recent)} Trades analysiert)")
+            return summary
+
+        except Exception as e:
+            logger.error(f"[LEARNING] Gemini-Zusammenfassung fehlgeschlagen: {e}")
+            return self._learning_summary  # Alten Cache zurueckgeben
+
     # ── Trade Recording ─────────────────────────────────
 
     def record_entry(
@@ -224,6 +471,13 @@ class AdaptiveLearner:
                     f"Recorded exit: {symbol} @ ${exit_price} "
                     f"P/L: {record.pnl_pct:+.2%} ({reason})"
                 )
+                # ── Auto-Blacklist: Stop-Loss tracken ──
+                if "STOP LOSS" in reason.upper():
+                    newly_blocked = self.record_stop_loss(symbol)
+                    if newly_blocked:
+                        logger.warning(
+                            f"[BLACKLIST] {symbol}: Automatisch gesperrt nach 2x Stop-Loss"
+                        )
                 # ── LERNEN nach jedem abgeschlossenen Trade ──
                 self._update_weights()
                 return
