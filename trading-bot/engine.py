@@ -1094,8 +1094,11 @@ class Engine:
         if bars.empty or len(bars) < 50:
             bars_count = len(bars) if not bars.empty else 0
             logger.warning(f"{symbol}: Not enough data ({bars_count} bars)")
-            # ── Auto-Remove: erst nach 3x 0 Bars → delisted ──
-            if bars_count == 0 and symbol in Config.WATCHLIST:
+            # ── Auto-Remove: nur manuelle Watchlist, erst nach 3x 0 Bars ──
+            # Dynamische Symbole (WatchlistDiscovery) werden einfach übersprungen —
+            # sie werden beim nächsten Discovery-Update sowieso ersetzt.
+            is_dynamic = symbol in self.watchlist.dynamic_symbols
+            if bars_count == 0 and symbol in Config.WATCHLIST and not is_dynamic:
                 self._zero_bar_strikes[symbol] = self._zero_bar_strikes.get(symbol, 0) + 1
                 strikes = self._zero_bar_strikes[symbol]
                 logger.warning(f"[WATCHLIST] {symbol}: 0 Bars (Strike {strikes}/3)")
