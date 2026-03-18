@@ -1,3 +1,22 @@
+================================================================================
+UPDATED FILES — Telegram Bot Fix
+Datum: 2026-03-18
+================================================================================
+
+AENDERUNGEN:
+1. main.py     — Telegram-Bot startet ZUERST, Engine laeuft im Hintergrund
+2. telegram_bot.py — Akzeptiert bestehende Engine-Instanz
+3. engine.py   — Mehr Debug-Logging in ReasoningLayer
+
+WIE UPDATE:
+  cp UPDATED_FILES.txt /tmp/  (sichern)
+  git pull origin claude/fix-telegram-bot-aTUv8
+  ODER: Dateien manuell ersetzen (Inhalt weiter unten)
+
+================================================================================
+DATEI 1: main.py
+================================================================================
+
 #!/usr/bin/env python3
 """
 main.py — SIX FILTERS. ONE TRADE.
@@ -128,10 +147,10 @@ def main():
                     eng.notify = bot.send_sync
                     bot.engine = eng
                     bot.is_running = True
-                    bot.send_sync("✅ Trading Engine bereit. /status fuer Account-Info.")
+                    bot.send_sync("Trading Engine bereit. /status fuer Account-Info.")
                     eng.run()
                 except Exception as e:
-                    bot.send_sync(f"❌ Engine Fehler beim Start: {e}")
+                    bot.send_sync(f"Engine Fehler beim Start: {e}")
 
             t = threading.Thread(target=_engine_thread, daemon=True, name="engine")
             t.start()
@@ -149,3 +168,57 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+================================================================================
+DATEI 2: telegram_bot.py  (nur geaenderte __init__ Methode — Rest unveraendert)
+================================================================================
+
+    def __init__(self, engine: Optional[Engine] = None):
+        self.token = Config.TELEGRAM_TOKEN
+        self.chat_id = Config.TELEGRAM_CHAT_ID
+        self.engine: Optional[Engine] = engine
+        self.is_running = engine is not None
+        self.is_paused = False
+        self.scan_thread: Optional[threading.Thread] = None
+        self.app: Optional[Application] = None
+        self._bot: Optional[Bot] = None
+
+
+================================================================================
+DATEI 3: engine.py  (nur geaenderte ReasoningLayer.__init__ — Rest unveraendert)
+================================================================================
+
+    def __init__(self):
+        logger.info("ReasoningLayer: Gemini Client wird initialisiert...")
+        from google import genai
+        self.client = genai.Client(api_key=Config.GEMINI_API_KEY)
+        logger.info("ReasoningLayer: Client OK, lade MarketContext...")
+        self.model = Config.REASONING_MODEL
+        self.min_confidence = Config.REASONING_MIN_CONFIDENCE
+        self.market_ctx = MarketContext()
+        logger.info(f"ReasoningLayer initialisiert: {self.model} (min_confidence={self.min_confidence})")
+
+
+================================================================================
+DEPLOY AUF SERVER:
+================================================================================
+
+Option A — Git pull (empfohlen):
+  cd /root/bot
+  git pull origin claude/fix-telegram-bot-aTUv8
+  # ODER wenn du auf main bist:
+  git fetch origin
+  git checkout claude/fix-telegram-bot-aTUv8
+
+Option B — Dateien manuell ersetzen:
+  nano /root/bot/trading-bot/main.py        # kompletten Inhalt aus Datei 1 einfuegen
+  nano /root/bot/trading-bot/telegram_bot.py # nur __init__ Methode ersetzen
+  nano /root/bot/trading-bot/engine.py       # nur ReasoningLayer.__init__ ersetzen
+
+Dann neu starten:
+  python main.py
+
+Der Bot antwortet jetzt SOFORT auf /start, auch waehrend die Engine noch laedt.
+Du bekommst eine Telegram-Nachricht wenn die Engine fertig ist.
+================================================================================

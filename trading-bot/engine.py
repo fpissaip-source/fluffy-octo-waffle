@@ -50,8 +50,10 @@ class ReasoningLayer:
     """
 
     def __init__(self):
+        logger.info("ReasoningLayer: Gemini Client wird initialisiert...")
         from google import genai
         self.client = genai.Client(api_key=Config.GEMINI_API_KEY)
+        logger.info("ReasoningLayer: Client OK, lade MarketContext...")
         self.model = Config.REASONING_MODEL
         self.min_confidence = Config.REASONING_MIN_CONFIDENCE
         self.market_ctx = MarketContext()
