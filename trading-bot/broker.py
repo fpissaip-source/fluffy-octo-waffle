@@ -330,6 +330,13 @@ class AlpacaBroker:
                         limit_price=round(bid, 2),
                         extended_hours=True,
                     )
+                elif qty:
+                    # Kein Bid verfügbar (Low-Liquidity) → Market-Order mit extended_hours
+                    order = self.api.submit_order(
+                        symbol=symbol, qty=qty, side="sell",
+                        type="market", time_in_force="day",
+                        extended_hours=True,
+                    )
                 else:
                     order = self.api.close_position(symbol)
             else:
