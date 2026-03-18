@@ -43,9 +43,9 @@ def evaluate(bars: pd.DataFrame, equity: float = 10000.0, **kwargs) -> dict:
     if spread and spread > 0 and current_price > 0:
         slippage_pct = (spread / current_price)   # realer Bid-Ask-Spread
     elif current_price < 1.0:
-        slippage_pct = 0.01   # 100 bps fuer Sub-Dollar Stocks
+        slippage_pct = 0.005  # 50 bps fuer Sub-Dollar Stocks (Alpaca NBBO)
     elif current_price < 5.0:
-        slippage_pct = 0.005  # 50 bps fuer Penny Stocks
+        slippage_pct = 0.002  # 20 bps fuer Penny Stocks (Alpaca Commission-free)
     else:
         slippage_pct = Config.SLIPPAGE_BPS / 10000  # Standard (10 bps)
     cost_pct = (slippage_pct + Config.FEE_BPS / 10000) * 2  # Roundtrip
