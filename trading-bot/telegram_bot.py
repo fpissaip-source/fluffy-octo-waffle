@@ -779,7 +779,12 @@ Antworte NUR mit JSON:
                     thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
                 ),
             )
-            text = response.text or ""
+            text = ""
+            for part in (response.candidates or [{}])[0].content.parts if response.candidates else []:
+                if hasattr(part, "text") and part.text:
+                    text += part.text
+            if not text:
+                text = response.text or ""
             result = None
             depth, start = 0, None
             for i, c in enumerate(text):
