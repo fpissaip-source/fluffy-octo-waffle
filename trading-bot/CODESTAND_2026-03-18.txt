@@ -1,112 +1,135 @@
 ================================================================================
-TRADING BOT v2.0 — CODESTAND 2026-03-18
+TRADING BOT v2.0 — CODESTAND 2026-03-18 (aktuell)
 Branch: claude/lower-min-ev-gap-YbMLS
 ================================================================================
 
+DATEIEN & ZEILENZAHLEN
+-----------------------
+engine.py          1806    Kern-Engine, Scan-Loop, Kill-Switch, Kandidaten-Queue, Exit-Alerts
+telegram_bot.py     968    Telegram-Interface, alle Befehle
+adaptive.py         810    Adaptives Lernen, Blacklist, Gewichte
+broker.py           391    Alpaca-Wrapper (inkl. Extended-Hours SELL Fix)
+risk_manager.py     365    Regime-Erkennung, Stop-Loss, Trailing-Stop, Kill-Switch
+market_context.py   361    Markt-Kontext (VIX, Trend, Regime-Input)
+screener.py         269    SpikeSensor, Top-Mover, Penny-Filter
+main.py             185    Einstiegspunkt, PID-Guard
+dashboard.py        196    Dashboard
+config.py            85    Konfigurationswerte (.env)
+api.py              153    API-Hilfsfunktionen
+formulas/
+  sentiment.py      473    News-Sentiment via Gemini
+  momentum.py       116    Momentum-Formel
+  bayesian.py        87    Bayesian-Posterior
+  kelly.py           81    Kelly-Criterion
+  ev_gap.py          64    Expected Value Gap
+  kl_divergence.py   63    KL-Divergenz
+  stoikov.py         55    Stoikov Reservation Price
+  __init__.py         5
+─────────────────────────────────────────────────
+GESAMT             5589 + 944 = 6533 Zeilen
+
 ARCHITEKTUR
 -----------
-3-Schichten-Architektur:
-  Schicht 1 (Perception)  — 7 quantitative Formeln (Momentum, Kelly, EV-Gap,
-                             KL-Divergenz, Bayesian, Stoikov, Sentiment)
-  Schicht 2 (Reasoning)   — Gemini-KI entscheidet PFLICHTWEISE vor jeder Order
-  Schicht 3 (Execution)   — Alpaca führt Order aus (Market oder Limit via Stoikov)
+3-Schichten:
+  1. Perception  — 7 Formeln scannen parallel (Momentum, Kelly, EV-Gap,
+                   KL-Divergenz, Bayesian, Stoikov, Sentiment)
+  2. Reasoning   — Gemini-KI bestätigt PFLICHTWEISE vor jeder Order
+  3. Execution   — Alpaca führt aus (Market oder Limit via Stoikov)
 
-DATEIEN
--------
-engine.py          1782 Zeilen   Kern-Engine, Scan-Loop, Kill-Switch, Kandidaten-Queue
-telegram_bot.py     969 Zeilen   Telegram-Interface, alle Befehle
-risk_manager.py     365 Zeilen   Regime-Erkennung, Stop-Loss, Trailing-Stop, Kill-Switch
-broker.py           357 Zeilen   Alpaca-Wrapper, Orders, Positionen, Bars
-config.py            85 Zeilen   Alle Konfigurationswerte (.env)
-adaptive.py                       Adaptives Lernen, Blacklist, Gewichte
-screener.py                       SpikeSensor, Top-Mover, Penny-Filter
-market_context.py                 Markt-Kontext (VIX, Trend, Regime-Input)
-formulas/                         momentum.py, kelly.py, ev_gap.py, kl_divergence.py,
-                                  bayesian.py, stoikov.py, sentiment.py
+KASKADEN-SYSTEM
+---------------
+  4/7 — Gemini-Check blockierend (Standard)
+  5/7 — Express Lane: Sofort-Order, Gemini async (65%)
+  6/7 — Express Lane: 75%
+  7/7 — Express Lane: 85%
 
-TELEGRAM-BEFEHLE (vollständig)
--------------------------------
+MARKT-REGIME (automatisch via Volatilität/VIX)
+-----------------------------------------------
+  CALM     VIX<15  | Max 12% pro Position | Max 5 Positionen
+  NORMAL   VIX<25  | Max 10% pro Position | Max 4 Positionen
+  VOLATILE VIX<35  | Max  6% pro Position | Max 3 Positionen
+  CRISIS   VIX>35  | Max  3% pro Position | Max 2 Positionen
 
-  MONITORING
-  /status      — Account-Übersicht (Equity, Cash, Positionen, Regime)
-  /positions   — Alle offenen Positionen mit P/L
-  /stoplosses  — Positionen + Stop-Loss & Take-Profit Level (ATR-basiert)
-  /orders      — Offene (noch nicht gefüllte) Orders bei Alpaca
-  /regime      — Aktuelles Markt-Regime + Risk-Parameter
-  /sentiment X — News-Sentiment-Analyse für Symbol X (via Gemini)
+EXIT-LOGIK (4 Trigger)
+-----------------------
+  1. Stop-Loss      ATR-basiert (2.0x–4.0x je Regime)
+  2. Trailing Stop  zieht mit wenn Preis steigt (1.5x–3.5x ATR)
+  3. Take-Profit    ATR-basiert (4.0x–12.0x je Regime)
+  4. Bayesian Exit  Posterior < 0.30 → Signal bearish → sofort raus
+  → Jeder Exit sendet Telegram-Alert mit Grund, P/L, Preis
 
-  TRADING-STEUERUNG
-  /scan        — Einmaliger Scan aller Watchlist-Symbole
-  /run         — Auto-Scan starten (alle 30s)
-  /pause       — Bot pausieren (kein neuer Scan)
-  /resume      — Bot fortsetzen
-  /stop        — Auto-Scan stoppen
-  /closeall    — Alle Positionen sofort schliessen + 15min Blacklist
-  /cancelbuy   — Alle offenen BUY-Orders canceln (Positionen bleiben)
+EXTENDED HOURS SELL FIX (2026-03-18)
+--------------------------------------
+  Vorher: Market-Order mit time_in_force=day → hängt bis Marktöffnung
+  Jetzt:  Limit-Order @ Bid-Preis mit extended_hours=True → sofort fill
+  Crypto: GTC Market-Order (unverändert, 24/7)
 
-  KANDIDATEN-QUEUE
-  /queue       — Zeigt Signale die auf Cash warten (max 5, beste Kaskade zuerst)
-                 Der Bot prüft jedes Kandidaten-Signal nochmal vollständig
-                 (alle 7 Layer + Gemini) bevor er aus der Queue kauft.
+KILL-SWITCH
+-----------
+  Drawdown > 15% vom Peak  → alle Positionen schliessen + Telegram-Alarm
+  Tagesverlust > 5%        → alle Positionen schliessen + Telegram-Alarm
+  Reset: /resume
 
-  ANALYSE
-  /erklaer     — Letzter Trade + alle Scan-Versuche + Regime erklärt
-  /stats       — Performance-Statistiken (Win-Rate, Avg P/L, etc.)
-  /weights     — Vom Bot gelernte Formel-Gewichte
-  /trades      — Alle heutigen Trades
-  /test TSLA   — Symbol durch alle 7 Layer schicken (Diagnose)
-
-  SCREENER
-  /screener            — Top-Mover des Tages (alle Kategorien)
-  /screener penny      — Penny Stocks < $5
-  /screener micro      — Micro-Cap < $1
-  /screener sub        — Sub-Penny < $0.01
-
-  WATCHLIST
-  /watchlist   — Aktuelle Watchlist anzeigen
-  /add TSLA    — Symbol zur Watchlist hinzufügen
-  /remove TSLA — Symbol aus Watchlist entfernen
-
-RISIKOMANAGEMENT
+KANDIDATEN-QUEUE
 ----------------
-Markt-Regime (automatisch erkannt via Volatilität / VIX):
-  CALM     — VIX < 15 | Max Position 12% | Max 5 gleichzeitig
-  NORMAL   — VIX 15-25 | Max Position 10% | Max 4 gleichzeitig
-  VOLATILE — VIX 25-35 | Max Position  6% | Max 3 gleichzeitig
-  CRISIS   — VIX > 35  | Max Position  3% | Max 2 gleichzeitig
-
-Kill-Switch (automatisch):
-  - Drawdown > 15% vom Peak  → ALLE Positionen schliessen + Telegram-Alarm
-  - Tagesverlust > 5%        → ALLE Positionen schliessen + Telegram-Alarm
-  - Danach: kein neuer Trade bis manueller Reset (/resume)
-
-Stop-Loss Typen (ATR-basiert, regime-adaptiv):
-  - Fixer Stop-Loss    (2.0x–4.0x ATR je Regime)
-  - Trailing Stop      (1.5x–3.5x ATR, zieht mit wenn Preis steigt)
-  - Take-Profit        (4.0x–12.0x ATR je Regime)
-  - Bayesian Exit      (wenn Posterior < 0.30 — Signal dreht bearish)
-
-Kandidaten-Queue:
-  - Kein Cash aber gutes Signal → Signal gespeichert (max 5)
-  - Nach jedem Position-Close   → Queue automatisch abgearbeitet
-  - Vor jedem Queue-Kauf        → VOLLSTÄNDIGE Neubewertung (7 Layer + Gemini)
-  - Stärkste Kaskade hat Vorrang (verdrängt schwächere bei vollem Queue)
-
-KASKADEN-SYSTEM (Signalstärke)
--------------------------------
-  4/7 — Standard: Gemini-Check blockierend vor Order
-  5/7 — Express Lane: Sofort-Order, Gemini prüft async (65% Konfidenz)
-  6/7 — Express Lane: 75% Konfidenz
-  7/7 — Express Lane: 85% Konfidenz
+  Kein Cash → Signal gespeichert (max 5, stärkste Kaskade gewinnt)
+  Nach Position-Close → Queue automatisch abgearbeitet
+  Vor Kauf → vollständige Neubewertung (7 Layer + Gemini)
+  /queue zeigt aktuelle Kandidaten
 
 DUPLIKAT-SCHUTZ
 ---------------
-  - has_open_order() prüft vor jedem BUY ob bereits eine offene Order existiert
-  - _pending_buys Set verhindert parallele Doppel-Orders
-  - _closing_positions Set verhindert Doppel-Close
+  has_open_order()       verhindert doppelte Buy-Orders
+  _pending_buys Set      verhindert parallele Doppel-Orders
+  _closing_positions Set verhindert Doppel-Close
 
-BOT-NEUSTARTEN (kill + pull + start)
---------------------------------------
-  rm -f /tmp/trading_bot.pid && pkill -f "python.*main.py"; sleep 2 && cd /root/bot && git fetch origin claude/lower-min-ev-gap-YbMLS && git checkout claude/lower-min-ev-gap-YbMLS && git pull origin claude/lower-min-ev-gap-YbMLS && cd trading-bot && nohup python main.py > /tmp/bot.log 2>&1 & echo $! > /tmp/trading_bot.pid && echo "Bot PID: $(cat /tmp/trading_bot.pid)" && tail -f /tmp/bot.log
+TELEGRAM-BEFEHLE (vollständig)
+-------------------------------
+  MONITORING
+  /status      Account-Übersicht (Equity, Cash, Regime)
+  /positions   Offene Positionen mit P/L
+  /stoplosses  Positionen + Stop-Loss & Take-Profit Level (ATR)
+  /orders      Offene (ungefüllte) Orders
+  /regime      Markt-Regime + Risk-Parameter
+  /sentiment X News-Sentiment für Symbol X
+
+  TRADING
+  /scan        Einmaliger Scan
+  /run         Auto-Scan starten (alle 30s)
+  /pause       Bot pausieren
+  /resume      Bot fortsetzen / Kill-Switch zurücksetzen
+  /stop        Auto-Scan stoppen
+  /closeall    Alle Positionen schliessen + 15min Blacklist
+  /cancelbuy   Alle offenen BUY-Orders canceln
+
+  QUEUE
+  /queue       Wartende Kandidaten anzeigen
+
+  ANALYSE
+  /erklaer     Letzter Trade + Scan-Versuche erklärt
+  /stats       Performance-Statistiken
+  /weights     Gelernte Formel-Gewichte
+  /trades      Heutige Trades
+  /test TSLA   Symbol durch alle 7 Layer (Diagnose)
+
+  SCREENER
+  /screener            Top-Mover
+  /screener penny      Penny Stocks <$5
+  /screener micro      <$1
+  /screener sub        Sub-Penny <$0.01
+
+  WATCHLIST
+  /watchlist   Anzeigen
+  /add TSLA    Hinzufügen
+  /remove TSLA Entfernen
+
+BOT NEUSTARTEN
+--------------
+rm -f /tmp/trading_bot.pid && pkill -f "python.*main.py"; sleep 2 && cd /root/bot && git pull origin claude/lower-min-ev-gap-YbMLS && cd trading-bot && nohup python main.py > /tmp/bot.log 2>&1 & echo $! > /tmp/trading_bot.pid && echo "Bot PID: $(cat /tmp/trading_bot.pid)" && tail -f /tmp/bot.log
+
+LOGS PRÜFEN
+-----------
+tail -f /tmp/bot.log
+grep -i "error\|kill\|exit\|buy\|sell" /tmp/bot.log | tail -30
 
 ================================================================================
