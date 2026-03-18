@@ -14,7 +14,7 @@ class Config:
 
     WATCHLIST: list[str] = [
         s.strip() for s in os.getenv(
-            "WATCHLIST", "NVDA,META,BTCUSD,ETHUSD"
+            "WATCHLIST", "NVDA,META,BTCUSD,ETHUSD,DVLT"
         ).split(",")
     ]
 
