@@ -835,6 +835,10 @@ class Engine:
         self._closing_positions: set[str] = set()  # Symbole mit laufendem Close-Order
         self._pending_buys: set[str] = set()        # Symbole mit laufendem Buy-Order
         self._order_lock = threading.Lock()
+        # Kandidaten-Queue: gute Signale die wegen fehlendem Cash warten
+        self._candidate_queue: list[dict] = []      # [{"symbol": ..., "signal": ..., "ts": ...}]
+        self._candidate_lock = threading.Lock()
+        self._MAX_CANDIDATES = 5                    # Maximal 5 Kandidaten speichern
         # Telegram-Callback (optional): wird von TradingTelegramBot gesetzt
         self.notify: Optional[callable] = None
 
@@ -855,6 +859,72 @@ class Engine:
         self.broker.close_position(symbol)
         self.position_highs.pop(symbol, None)
         return True
+
+    def _queue_candidate(self, signal, price: float):
+        """Speichert ein Signal in der Kandidaten-Queue wenn kein Cash verfügbar."""
+        from datetime import datetime
+        with self._candidate_lock:
+            # Duplikate vermeiden
+            existing = [c["symbol"] for c in self._candidate_queue]
+            if signal.symbol in existing:
+                return
+            # Queue begrenzen: schlechtesten Kandidaten verdrängen
+            if len(self._candidate_queue) >= self._MAX_CANDIDATES:
+                self._candidate_queue.sort(key=lambda c: c["cascade_level"])
+                if signal.cascade_level <= self._candidate_queue[0]["cascade_level"]:
+                    logger.info(f"{signal.symbol}: Queue voll, Signal zu schwach für Kandidaten")
+                    return
+                self._candidate_queue.pop(0)
+            self._candidate_queue.append({
+                "symbol": signal.symbol,
+                "signal": signal,
+                "price": price,
+                "cascade_level": signal.cascade_level,
+                "ts": datetime.now(),
+            })
+            count = len(self._candidate_queue)
+            logger.info(f"{signal.symbol}: Kein Cash — in Kandidaten-Queue gespeichert ({count}/{self._MAX_CANDIDATES})")
+            self._tg(
+                f"💾 <b>Kandidat gespeichert:</b> {signal.symbol}\n"
+                f"Kaskade: {signal.cascade_label} | Preis: ${price:.2f}\n"
+                f"Queue: {count}/{self._MAX_CANDIDATES} — wird gekauft sobald Cash frei"
+            )
+
+    def _flush_candidate_queue(self):
+        """Versucht Kandidaten aus der Queue zu kaufen wenn Cash verfügbar."""
+        with self._candidate_lock:
+            if not self._candidate_queue:
+                return
+            candidates = sorted(self._candidate_queue, key=lambda c: c["cascade_level"], reverse=True)
+
+        try:
+            cash = float(self.broker.api.get_account().cash)
+        except Exception:
+            return
+
+        bought = []
+        for c in candidates:
+            symbol = c["symbol"]
+            # Nicht kaufen wenn bereits Position vorhanden
+            if self.broker.has_position(symbol):
+                bought.append(symbol)
+                continue
+            price = self.broker.get_latest_price(symbol) or c["price"]
+            if cash < price:
+                continue
+            if not self.risk.can_open_position(len(self.broker.get_positions())):
+                break
+            logger.info(f"[QUEUE FLUSH] Kaufe Kandidat {symbol} @ ${price:.2f}")
+            self._tg(f"🔄 <b>Queue-Kandidat wird ausgeführt:</b> {symbol} @ ${price:.2f}")
+            order_id = self.broker.market_buy(symbol, c["signal"].qty)
+            if order_id:
+                cash -= price * c["signal"].qty
+                bought.append(symbol)
+                self.position_highs[symbol] = price
+
+        if bought:
+            with self._candidate_lock:
+                self._candidate_queue = [c for c in self._candidate_queue if c["symbol"] not in bought]
 
     def startup_position_review(self):
         """
@@ -1305,11 +1375,24 @@ class Engine:
             )
             return None
 
-        # Cap qty by risk manager
+        # Cap qty by risk manager + Cash-Check
         equity = self.broker.get_equity()
         price = self.broker.get_latest_price(signal.symbol) or 1
         max_qty = self.risk.max_position_size(equity, price)
         signal.qty = min(signal.qty, max_qty)
+
+        # Kein Cash → Kandidaten-Queue
+        cash = self.broker.api.get_account().cash
+        try:
+            cash = float(cash)
+        except Exception:
+            cash = 0.0
+        min_order_value = price * 1  # mindestens 1 Aktie
+        if cash < min_order_value:
+            self._queue_candidate(signal, price)
+            with self._order_lock:
+                self._pending_buys.discard(signal.symbol)
+            return None
 
         # ── SCHICHT 2: Reasoning Layer ──
         # EXPRESS LANE: ab 5/7 → sofort handeln, Gemini prüft async ob HALTEN oder VERKAUFEN
@@ -1470,6 +1553,19 @@ class Engine:
         # Kill-Switch Check
         if self.risk.check_kill_switch(equity):
             logger.critical("KILL SWITCH ACTIVE — closing ALL positions")
+            drawdown = (equity - self.risk.peak_equity) / self.risk.peak_equity if self.risk.peak_equity > 0 else 0
+            daily_chg = (equity - self.risk.start_of_day_equity) / self.risk.start_of_day_equity if self.risk.start_of_day_equity > 0 else 0
+            trigger = "Max Drawdown" if drawdown < -self.risk.max_drawdown_limit else "Tagesverlust"
+            self._tg(
+                f"🚨 <b>KILL SWITCH AKTIVIERT</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Auslöser: <b>{trigger}</b>\n"
+                f"Equity:       ${equity:,.2f}\n"
+                f"Drawdown:  {drawdown:+.1%} (Peak: ${self.risk.peak_equity:,.2f})\n"
+                f"Heute:        {daily_chg:+.1%}\n"
+                f"⛔ Alle {len(positions)} Position(en) werden geschlossen.\n"
+                f"Keine neuen Trades bis manueller Reset."
+            )
             for symbol in positions:
                 with self._order_lock:
                     if symbol not in self._closing_positions:
@@ -1535,6 +1631,11 @@ class Engine:
                     self.learner.record_exit(
                         symbol, current_price, exit_decision["reason"]
                     )
+
+                    # ── Kandidaten-Queue: Cash ist frei, sofort kaufen ──
+                    threading.Thread(
+                        target=self._flush_candidate_queue, daemon=True
+                    ).start()
 
             except Exception as e:
                 logger.error(f"Exit check error {symbol}: {e}")

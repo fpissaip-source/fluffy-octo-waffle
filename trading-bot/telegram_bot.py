@@ -553,6 +553,31 @@ class TradingTelegramBot:
         except Exception as e:
             await update.message.reply_text(f"Error: {e}")
 
+    async def cmd_queue(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Zeigt die Kandidaten-Queue (Signale die auf Cash warten)."""
+        try:
+            engine = self.engine
+            with engine._candidate_lock:
+                candidates = list(engine._candidate_queue)
+            if not candidates:
+                await update.message.reply_text("Keine Kandidaten in der Queue.")
+                return
+            candidates_sorted = sorted(candidates, key=lambda c: c["cascade_level"], reverse=True)
+            lines = [f"<b>💾 Kandidaten-Queue ({len(candidates)}/{engine._MAX_CANDIDATES})</b>",
+                     "━━━━━━━━━━━━━━━━━━━━━━",
+                     "<i>Werden gekauft sobald Cash frei wird</i>"]
+            for c in candidates_sorted:
+                age_min = int((c["ts"] - c["ts"].replace(hour=0, minute=0, second=0, microsecond=0)).total_seconds() / 60) if hasattr(c["ts"], "replace") else 0
+                from datetime import datetime
+                age_min = int((datetime.now() - c["ts"]).total_seconds() / 60)
+                lines.append(
+                    f"⭐ <b>{c['symbol']}</b> — {c['signal'].cascade_label}\n"
+                    f"  Preis: ${c['price']:.2f} | Qty: {c['signal'].qty} | vor {age_min}min"
+                )
+            await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+        except Exception as e:
+            await update.message.reply_text(f"Error: {e}")
+
     async def cmd_test(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Schickt ein Symbol einmal durch alle 7 Layer und gibt das Ergebnis detailliert zurueck."""
         if not context.args:
@@ -933,6 +958,7 @@ Antworte NUR mit JSON:
         self.app.add_handler(CommandHandler("stoplosses", self.cmd_stoplosses))
         self.app.add_handler(CommandHandler("orders", self.cmd_orders))
         self.app.add_handler(CommandHandler("cancelbuy", self.cmd_cancelbuy))
+        self.app.add_handler(CommandHandler("queue", self.cmd_queue))
 
         logger.info("Telegram bot running. Send /start to begin.")
         self.app.run_polling(drop_pending_updates=True)
