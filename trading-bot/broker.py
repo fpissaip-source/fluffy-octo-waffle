@@ -312,9 +312,14 @@ class AlpacaBroker:
         clock = self.api.get_clock()
         if clock.is_open:
             return "open"
-        # ET-Zeit direkt berechnen (EDT = UTC-4, gilt nach DST-Umstellung Anfang März)
+        # ET-Zeit dynamisch berechnen (EDT=UTC-4 / EST=UTC-5 je nach Jahreszeit)
         now_utc = datetime.now(timezone.utc)
-        now_et = now_utc - timedelta(hours=4)
+        try:
+            import zoneinfo
+            now_et = now_utc.astimezone(zoneinfo.ZoneInfo("America/New_York"))
+        except Exception:
+            # Fallback: EDT (UTC-4) wenn zoneinfo nicht verfügbar
+            now_et = now_utc - timedelta(hours=4)
         et_hour = now_et.hour + now_et.minute / 60
         weekday = now_et.weekday()  # 0=Mo, 6=So
         if weekday < 5:  # Mo–Fr
