@@ -827,6 +827,7 @@ class Engine:
         self.trade_log: list[TradeSignal] = []
         self.scan_attempts: list[dict] = []   # Alle Scan-Versuche (auch abgelehnte)
         self.position_highs: dict[str, float] = {}
+        self._zero_bar_strikes: dict[str, int] = {}  # Zählt aufeinanderfolgende 0-Bar-Fehler
         self._async_threads: list[threading.Thread] = []
         self._exit_lock = threading.Lock()
         self._stop_event = threading.Event()
@@ -1093,11 +1094,18 @@ class Engine:
         if bars.empty or len(bars) < 50:
             bars_count = len(bars) if not bars.empty else 0
             logger.warning(f"{symbol}: Not enough data ({bars_count} bars)")
-            # ── Auto-Remove: 0 Bars → delisted ──
+            # ── Auto-Remove: erst nach 3x 0 Bars → delisted ──
             if bars_count == 0 and symbol in Config.WATCHLIST:
-                Config.WATCHLIST.remove(symbol)
-                logger.warning(f"[WATCHLIST] {symbol}: 0 Bars — vermutlich delisted. Automatisch entfernt.")
-                self._tg(f"🗑 <b>{symbol}</b> von Watchlist entfernt (keine Kursdaten — vermutlich delisted)")
+                self._zero_bar_strikes[symbol] = self._zero_bar_strikes.get(symbol, 0) + 1
+                strikes = self._zero_bar_strikes[symbol]
+                logger.warning(f"[WATCHLIST] {symbol}: 0 Bars (Strike {strikes}/3)")
+                if strikes >= 3:
+                    Config.WATCHLIST.remove(symbol)
+                    self._zero_bar_strikes.pop(symbol, None)
+                    logger.warning(f"[WATCHLIST] {symbol}: 3x 0 Bars — vermutlich delisted. Automatisch entfernt.")
+                    self._tg(f"🗑 <b>{symbol}</b> von Watchlist entfernt (3x keine Kursdaten — vermutlich delisted)")
+            elif bars_count > 0 and symbol in self._zero_bar_strikes:
+                self._zero_bar_strikes.pop(symbol, None)  # Reset bei erfolgreichen Daten
             signal.reason = "Insufficient data"
             return signal
 
