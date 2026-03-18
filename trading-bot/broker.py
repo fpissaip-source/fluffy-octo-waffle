@@ -77,11 +77,11 @@ class AlpacaBroker:
     def has_position(self, symbol: str) -> bool:
         return symbol in self.get_positions()
 
-    def has_open_order(self, symbol: str) -> bool:
-        """True wenn bereits eine offene Buy-Order für dieses Symbol existiert."""
+    def has_open_order(self, symbol: str, side: str = "buy") -> bool:
+        """True wenn bereits eine offene Order (buy oder sell) für dieses Symbol existiert."""
         try:
             orders = self.api.list_orders(status="open", symbols=[symbol])
-            return any(o.side == "buy" for o in orders)
+            return any(o.side == side for o in orders)
         except Exception:
             return False
 

@@ -835,16 +835,6 @@ class Engine:
         # Schutz gegen Doppel-Close und Doppel-Buy
         self._closing_positions: set[str] = set()  # Symbole mit laufendem Close-Order
         self._pending_buys: set[str] = set()        # Symbole mit laufendem Buy-Order
-        # Beim Start: offene Sell-Orders einlesen damit kein Doppel-Close passiert
-        try:
-            open_orders = self.broker.api.list_orders(status="open")
-            for o in open_orders:
-                if getattr(o, "side", "") == "sell":
-                    self._closing_positions.add(o.symbol)
-            if self._closing_positions:
-                logger.info(f"[INIT] Offene Sell-Orders erkannt: {self._closing_positions} → in _closing_positions eingetragen")
-        except Exception as e:
-            logger.warning(f"[INIT] Offene Orders konnten nicht geladen werden: {e}")
         self._order_lock = threading.Lock()
         # Kandidaten-Queue: gute Signale die wegen fehlendem Cash warten
         self._candidate_queue: list[dict] = []      # [{"symbol": ..., "signal": ..., "ts": ...}]
@@ -1609,7 +1599,11 @@ class Engine:
                 # Kein doppelter Close wenn bereits eine Order laeuft
                 with self._order_lock:
                     if symbol in self._closing_positions:
-                        continue
+                        # Prüfen ob Sell-Order noch aktiv — sonst Sperre aufheben
+                        if self.broker.has_open_order(symbol, side="sell"):
+                            continue
+                        else:
+                            self._closing_positions.discard(symbol)
 
                 bars = self.broker.get_bars(symbol, timeframe=Config.TRADING_TIMEFRAME, limit=50)
                 if bars.empty:
