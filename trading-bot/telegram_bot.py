@@ -310,29 +310,23 @@ class TradingTelegramBot:
 
             learner = AdaptiveLearner()
 
-            # Alpaca: cancel_orders=True bricht offene Orders ab UND schliesst Positionen
-            # in einem einzigen API-Aufruf (verhindert 403 Race Condition)
-            responses = broker.api.close_all_positions(cancel_orders=True)
+            # Schritt 1: Alle offenen Orders canceln (verhindert 403 bei close)
+            try:
+                broker.api.cancel_all_orders()
+                import time as _t; _t.sleep(1)
+            except Exception as ce:
+                logger.warning(f"cancel_all_orders: {ce}")
 
+            # Schritt 2: Positionen einzeln schließen
             closed = []
             failed = []
-            for resp in (responses or []):
-                try:
-                    sym = getattr(resp, "symbol", None) or str(resp)
-                    status = getattr(resp, "status", 200)
-                    if str(status) in ("200", "207") or hasattr(resp, "id"):
-                        closed.append(sym)
-                        learner.temp_blacklist(sym, minutes=15)
-                    else:
-                        failed.append(sym)
-                except Exception:
-                    pass
-
-            # Fallback: falls responses leer aber Positionen da waren → alle als closed zählen
-            if not closed and not failed:
-                closed = sym_list
-                for sym in sym_list:
+            for sym in sym_list:
+                order_id = broker.close_position(sym)
+                if order_id:
+                    closed.append(sym)
                     learner.temp_blacklist(sym, minutes=15)
+                else:
+                    failed.append(sym)
 
             unblock_time = (datetime.now() + timedelta(minutes=15)).strftime("%H:%M")
             text = ""
