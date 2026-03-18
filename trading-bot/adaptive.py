@@ -146,7 +146,7 @@ class AdaptiveLearner:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         self.trade_history: list[TradeRecord] = []
         self.weights: dict[str, dict[str, float]] = {}
-        self.learning_rate = 0.1  # Konservativ
+        self.learning_rate = 0.15  # Angepasst für 15Min-Takt
         self.min_trades_to_learn = 10  # Mindestens 10 Trades bevor angepasst wird
         self.max_history = 500  # Max Trades im Speicher
 
@@ -495,7 +495,7 @@ Antworte mit einer kompakten Zusammenfassung die direkt in zukünftige Trading-E
     # ── Regime Decay (Verhindert Overfitting auf veraltete Muster) ─────
 
     # Nach dieser Anzahl Tage ohne Trade in einem Regime beginnt der Zerfall
-    DECAY_START_DAYS: int = 7
+    DECAY_START_DAYS: int = 3
     # Wie stark pro Tag zurück zu DEFAULT_WEIGHTS (5% pro Tag)
     DECAY_RATE_PER_DAY: float = 0.05
 

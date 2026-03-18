@@ -61,7 +61,7 @@ def evaluate(bars: pd.DataFrame, equity: float = 10000.0, **kwargs) -> dict:
     return {
         "name": "Kelly",
         "signal": round(adjusted, 4),
-        "passed": adjusted > 0.005,
+        "passed": adjusted > 0.002,
         "details": {
             "win_rate": round(win_prob, 3),
             "payoff_ratio": round(payoff, 3),
