@@ -1,0 +1,781 @@
+================================================================================
+TRADING BOT v2.0 — VOLLSTÄNDIGER CODE-STAND
+Datum: 2026-03-18
+================================================================================
+
+Dateien:
+  1. config.py
+  2. formulas/kelly.py
+  3. formulas/momentum.py
+  4. formulas/ev_gap.py
+  5. formulas/kl_divergence.py
+  6. formulas/bayesian.py
+  7. formulas/stoikov.py
+  8. formulas/sentiment.py
+  9. risk_manager.py
+ 10. broker.py
+ 11. screener.py
+ 12. adaptive.py
+ 13. market_context.py
+ 14. telegram_bot.py
+ 15. main.py
+ 16. engine.py
+
+================================================================================
+DATEI: config.py
+================================================================================
+
+"""config.py — Zentrale Konfiguration."""
+
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).parent / ".env")
+
+
+class Config:
+    API_KEY: str = os.getenv("ALPACA_API_KEY", "")
+    SECRET_KEY: str = os.getenv("ALPACA_SECRET_KEY", "")
+    BASE_URL: str = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
+
+    WATCHLIST: list[str] = [
+        s.strip() for s in os.getenv(
+            "WATCHLIST", "NVDA,META,BTCUSD,ETHUSD,DVLT"
+        ).split(",")
+    ]
+
+    MAX_POSITION_PCT: float = float(os.getenv("MAX_POSITION_PCT", "0.10"))
+    KELLY_FRACTION: float = float(os.getenv("KELLY_FRACTION", "0.25"))
+    MIN_EV_GAP: float = float(os.getenv("MIN_EV_GAP", "0.02"))
+    MIN_MOMENTUM_SCORE: float = float(os.getenv("MIN_MOMENTUM_SCORE", "0.50"))
+    KL_DIVERGENCE_THRESHOLD: float = 0.15
+    MIN_BAYESIAN_POSTERIOR: float = 0.60
+    STOIKOV_SPREAD_MULT: float = 1.5
+
+    SCAN_INTERVAL: int = int(os.getenv("SCAN_INTERVAL", "30"))
+    LOOKBACK_BARS: int = 100
+    SHORT_WINDOW: int = 10
+    LONG_WINDOW: int = 30
+
+    # Chart-Timeframe (Daytrading: "5Min" / Swing: "1Hour")
+    TRADING_TIMEFRAME: str = os.getenv("TRADING_TIMEFRAME", "1Hour")
+
+    # News / Sentiment Horizont
+    NEWS_LOOKBACK_HOURS: int = int(os.getenv("NEWS_LOOKBACK_HOURS", "72"))
+    NEWS_MAX_ARTICLES:   int = int(os.getenv("NEWS_MAX_ARTICLES",   "30"))
+    SENTIMENT_GEMINI_HEADLINES: int = 25
+
+    LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+
+    # Telegram
+    TELEGRAM_TOKEN: str = os.getenv("TELEGRAM_TOKEN", "")
+    TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
+
+    # Google Gemini API
+    GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
+
+    # LunarCrush (optional)
+    LUNARCRUSH_API_KEY: str = os.getenv("LUNARCRUSH_API_KEY", "")
+
+    # Finnhub
+    FINNHUB_API_KEY: str = os.getenv("FINNHUB_API_KEY", "")
+    FINNHUB_EARNINGS_BLOCK_DAYS: int = 3
+
+    # Reasoning Layer
+    REASONING_MODEL: str = "gemini-2.5-flash"
+    REASONING_MIN_CONFIDENCE: float = 0.55
+    REASONING_TIMEOUT: int = 20
+
+    # Slippage & Fee Model
+    SLIPPAGE_BPS: float = float(os.getenv("SLIPPAGE_BPS", "10"))
+    FEE_BPS: float = float(os.getenv("FEE_BPS", "1"))
+
+    # Spike-Sensor
+    SPIKE_SCAN_INTERVAL: int = 60
+    SPIKE_MIN_PCT: float = 0.03
+
+    @classmethod
+    def is_paper(cls) -> bool:
+        return "paper" in cls.BASE_URL
+
+    @classmethod
+    def validate(cls) -> bool:
+        if not cls.API_KEY or cls.API_KEY == "your_paper_api_key_here":
+            return False
+        if not cls.SECRET_KEY or cls.SECRET_KEY == "your_paper_secret_key_here":
+            return False
+        if not cls.GEMINI_API_KEY:
+            raise RuntimeError("GEMINI_API_KEY fehlt in .env — Reasoning Layer nicht verfuegbar. Bot gestoppt.")
+        return True
+
+
+================================================================================
+DATEI: formulas/kelly.py
+================================================================================
+
+"""
+Formula 2 — Kelly Criterion
+f* = (p * b - q) / b
+Wir verwenden Quarter-Kelly fuer konservatives Sizing.
+"""
+
+import numpy as np
+import pandas as pd
+from config import Config
+
+
+def kelly_fraction(win_prob: float, payoff_ratio: float) -> float:
+    q = 1.0 - win_prob
+    f_star = (win_prob * payoff_ratio - q) / payoff_ratio
+    return max(0.0, min(f_star, 1.0))
+
+
+def evaluate(bars: pd.DataFrame, equity: float = 10000.0, **kwargs) -> dict:
+    if len(bars) < 20:
+        return {"name": "Kelly", "signal": 0.0, "passed": False,
+                "details": {"error": "Not enough data"}}
+
+    returns = bars["returns"].dropna()
+
+    recent = returns.iloc[len(returns) * 2 // 3 :]
+    older  = returns.iloc[: len(returns) // 3]
+    win_prob = (recent > 0).sum() / max(len(recent), 1)
+    older_win = (older > 0).sum() / max(len(older), 1)
+    win_prob = min(win_prob + max(win_prob - older_win, 0) * 0.5, 0.75)
+
+    gains = recent[recent > 0]
+    losses = recent[recent < 0]
+    avg_gain = gains.mean() if len(gains) > 0 else 0.001
+    avg_loss = abs(losses.mean()) if len(losses) > 0 else 0.001
+
+    spread = kwargs.get("spread", 0.0)
+    current_price = bars["close"].iloc[-1]
+    if spread and spread > 0 and current_price > 0:
+        slippage_pct = (spread / current_price)
+    elif current_price < 1.0:
+        slippage_pct = 0.01
+    elif current_price < 5.0:
+        slippage_pct = 0.005
+    else:
+        slippage_pct = Config.SLIPPAGE_BPS / 10000
+    cost_pct = (slippage_pct + Config.FEE_BPS / 10000) * 2
+    adj_gain = max(avg_gain - cost_pct, 0.0001)
+    adj_loss = avg_loss + cost_pct
+    payoff = min(adj_gain / adj_loss, 10.0)
+
+    full_kelly = kelly_fraction(win_prob, payoff)
+    adjusted = full_kelly * Config.KELLY_FRACTION
+    final_pct = min(adjusted, Config.MAX_POSITION_PCT)
+    bet_size = equity * final_pct
+
+    return {
+        "name": "Kelly",
+        "signal": round(adjusted, 4),
+        "passed": adjusted > 0.005,
+        "details": {
+            "win_rate": round(win_prob, 3),
+            "payoff_ratio": round(payoff, 3),
+            "full_kelly": round(full_kelly, 4),
+            "adjusted_kelly": round(adjusted, 4),
+            "final_pct": round(final_pct, 4),
+            "bet_size_usd": round(bet_size, 2),
+            "fraction_used": f"{Config.KELLY_FRACTION}x Kelly",
+            "cost_pct": f"{cost_pct*100:.3f}%",
+            "slippage_bps": round(slippage_pct * 10000, 1),
+        },
+    }
+
+
+================================================================================
+DATEI: formulas/momentum.py
+================================================================================
+
+"""
+Formula 1 — Momentum & Mean Reversion Detection
+
+Signale:
+  - RSI (14) fuer Overbought/Oversold
+  - EMA Crossover (8/21) fuer Trendrichtung
+  - Rate of Change (10-bar) fuer Staerke
+  - Bollinger Band Position fuer Mean-Reversion
+
+Output: signal (-1.0 bis +1.0), passed (bool)
+"""
+
+import numpy as np
+import pandas as pd
+
+
+def _rsi(closes: np.ndarray, period: int = 14) -> float:
+    deltas = np.diff(closes[-(period + 1):])
+    gains = np.where(deltas > 0, deltas, 0)
+    losses = np.where(deltas < 0, -deltas, 0)
+    avg_gain = np.mean(gains) if len(gains) > 0 else 0
+    avg_loss = np.mean(losses) if len(losses) > 0 else 1e-10
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+
+def _ema(data: np.ndarray, period: int) -> np.ndarray:
+    alpha = 2 / (period + 1)
+    ema = np.zeros_like(data, dtype=float)
+    ema[0] = data[0]
+    for i in range(1, len(data)):
+        ema[i] = alpha * data[i] + (1 - alpha) * ema[i - 1]
+    return ema
+
+
+def _bollinger_position(closes: np.ndarray, period: int = 20, num_std: float = 2.0) -> float:
+    if len(closes) < period:
+        return 0.5
+    window = closes[-period:]
+    mean = np.mean(window)
+    std = np.std(window)
+    if std < 1e-10:
+        return 0.5
+    upper = mean + num_std * std
+    lower = mean - num_std * std
+    pos = (closes[-1] - lower) / (upper - lower)
+    return float(np.clip(pos, 0.0, 1.0))
+
+
+def evaluate(bars: pd.DataFrame, threshold: float = 0.6, **kwargs) -> dict:
+    name = "Momentum"
+
+    if bars is None or bars.empty or len(bars) < 30:
+        return {"name": name, "signal": 0.0, "passed": False,
+                "details": {"error": "Not enough bars"}}
+
+    closes = bars["close"].values.astype(float)
+
+    rsi = _rsi(closes, 14)
+    ema_fast = _ema(closes, 8)
+    ema_slow = _ema(closes, 21)
+    ema_diff = (ema_fast[-1] - ema_slow[-1]) / closes[-1]
+    roc = (closes[-1] - closes[-11]) / closes[-11] if len(closes) > 11 else 0.0
+    bb_pos = _bollinger_position(closes, 20, 2.0)
+
+    score = 0.0
+    signals = 0
+
+    if rsi < 30:
+        score += 0.3
+        signals += 1
+    elif rsi > 70:
+        score -= 0.3
+        signals += 1
+
+    if ema_diff > 0.002:
+        score += 0.25
+        signals += 1
+    elif ema_diff < -0.002:
+        score -= 0.25
+        signals += 1
+
+    if roc > 0.02:
+        score += 0.25
+        signals += 1
+    elif roc < -0.02:
+        score -= 0.25
+        signals += 1
+
+    if bb_pos < 0.1:
+        score += 0.2
+        signals += 1
+    elif bb_pos > 0.9:
+        score -= 0.2
+        signals += 1
+
+    confidence = min(abs(score) / 0.7, 1.0)
+    passed = confidence >= threshold and signals >= 2 and score > 0
+
+    return {
+        "name": name,
+        "signal": round(float(score), 3),
+        "passed": passed,
+        "details": {
+            "rsi": round(rsi, 1),
+            "ema_diff": round(ema_diff, 4),
+            "roc": round(roc, 4),
+            "bb_pos": round(bb_pos, 3),
+            "confidence": round(confidence, 3),
+            "signals": signals,
+        },
+    }
+
+
+================================================================================
+DATEI: formulas/ev_gap.py
+================================================================================
+
+"""
+Formula 3 — EV Gap Detection
+Vergleicht aktuellen Preis mit Fair Value (VWAP + Bollinger + EMA).
+Sucht Gaps wo Expected Value positiv ist.
+"""
+
+import numpy as np
+import pandas as pd
+from config import Config
+
+
+def estimate_fair_value(bars: pd.DataFrame) -> float:
+    prices = bars["close"]
+    volumes = bars["volume"]
+    vwap = (prices * volumes).sum() / volumes.sum() if volumes.sum() > 0 else prices.mean()
+    bb_mid = prices.rolling(20).mean().iloc[-1]
+    ema21 = prices.ewm(span=21, adjust=False).mean().iloc[-1]
+    return vwap * 0.4 + bb_mid * 0.3 + ema21 * 0.3
+
+
+def evaluate(bars: pd.DataFrame, **kwargs) -> dict:
+    if len(bars) < 25:
+        return {"name": "EV-Gap", "signal": 0.0, "passed": False,
+                "details": {"error": "Not enough data"}}
+
+    current_price = bars["close"].iloc[-1]
+    fair_value = estimate_fair_value(bars)
+    win_prob = kwargs.get("win_prob", 0.55)
+
+    gap_pct = (fair_value - current_price) / current_price
+    upside = abs(gap_pct) if gap_pct > 0 else abs(gap_pct) * 0.3
+    downside = abs(gap_pct) * 0.5
+
+    spread = kwargs.get("spread", 0.0)
+    if spread and spread > 0 and current_price > 0:
+        slippage_pct = spread / current_price
+    elif current_price < 1.0:
+        slippage_pct = 0.01
+    elif current_price < 5.0:
+        slippage_pct = 0.005
+    else:
+        slippage_pct = Config.SLIPPAGE_BPS / 10000
+    cost_pct = (slippage_pct + Config.FEE_BPS / 10000) * 2
+    net_upside = max(upside - cost_pct, 0.0)
+    net_downside = downside + cost_pct
+    ev = win_prob * net_upside - (1 - win_prob) * net_downside
+
+    direction = "LONG" if gap_pct > 0 else "SHORT" if gap_pct < -Config.MIN_EV_GAP else "NEUTRAL"
+
+    return {
+        "name": "EV-Gap",
+        "signal": round(ev, 5),
+        "passed": abs(ev) > Config.MIN_EV_GAP and gap_pct > 0,
+        "details": {
+            "current_price": round(current_price, 2),
+            "fair_value": round(fair_value, 2),
+            "gap_pct": f"{gap_pct:+.2%}",
+            "ev": round(ev, 5),
+            "direction": direction,
+            "cost_pct": f"{cost_pct*100:.3f}%",
+            "slippage_bps": round(slippage_pct * 10000, 1),
+        },
+    }
+
+
+================================================================================
+DATEI: formulas/kl_divergence.py
+================================================================================
+
+"""
+Formula 4 — KL-Divergence (Cross-Timeframe)
+Misst statistische Distanz zwischen kurz- und langfristigen Returns.
+Hohe Divergenz = Zeitrahmen aus dem Gleichgewicht = Opportunity.
+"""
+
+import numpy as np
+import pandas as pd
+from config import Config
+
+
+def symmetric_kl(p: np.ndarray, q: np.ndarray) -> float:
+    p = np.clip(p, 1e-10, None)
+    q = np.clip(q, 1e-10, None)
+    p = p / p.sum()
+    q = q / q.sum()
+    kl_pq = float(np.sum(p * np.log(p / q)))
+    kl_qp = float(np.sum(q * np.log(q / p)))
+    return (kl_pq + kl_qp) / 2
+
+
+def evaluate(bars: pd.DataFrame, **kwargs) -> dict:
+    if len(bars) < 50:
+        return {"name": "KL-Divergence", "signal": 0.0, "passed": False,
+                "details": {"error": "Need 50+ bars"}}
+
+    returns = bars["returns"].dropna()
+    short_returns = returns.tail(10)
+    long_returns = returns.tail(50)
+
+    range_min = long_returns.min()
+    range_max = long_returns.max()
+    bins = np.linspace(range_min, range_max, 21)
+
+    p_short, _ = np.histogram(short_returns, bins=bins, density=True)
+    q_long, _ = np.histogram(long_returns, bins=bins, density=True)
+
+    p_short = p_short + 1e-10
+    q_long = q_long + 1e-10
+    p_short = p_short / p_short.sum()
+    q_long = q_long / q_long.sum()
+
+    kl_div = symmetric_kl(p_short, q_long)
+    threshold = kwargs.get("threshold", Config.KL_DIVERGENCE_THRESHOLD)
+
+    short_mean = short_returns.mean()
+    long_mean = long_returns.mean()
+    drift = "SHORT_OUTPERFORMS" if short_mean > long_mean else "SHORT_UNDERPERFORMS"
+    bullish_reversion = short_mean < long_mean and kl_div > threshold
+
+    return {
+        "name": "KL-Divergence",
+        "signal": round(kl_div, 4),
+        "passed": kl_div > threshold,
+        "details": {
+            "kl_divergence": round(kl_div, 4),
+            "threshold": threshold,
+            "short_mean": f"{short_mean:+.4f}",
+            "long_mean": f"{long_mean:+.4f}",
+            "drift": drift,
+            "bullish_reversion": bullish_reversion,
+        },
+    }
+
+
+================================================================================
+DATEI: formulas/bayesian.py
+================================================================================
+
+"""
+Formula 5 — Bayesian Updates
+P(H|E) = P(E|H) * P(H) / P(E)
+Aktualisiert Trade-Wahrscheinlichkeit basierend auf Volume, Momentum, Volatilitaet.
+"""
+
+import numpy as np
+import pandas as pd
+
+
+class BayesianUpdater:
+    def __init__(self, prior: float = 0.5):
+        self.posterior = prior
+        self.updates = []
+
+    def update(self, likelihood_ratio: float, label: str = "") -> float:
+        prior_odds = self.posterior / (1.0 - self.posterior + 1e-10)
+        posterior_odds = prior_odds * likelihood_ratio
+        self.posterior = posterior_odds / (1.0 + posterior_odds)
+        self.posterior = max(0.05, min(0.95, self.posterior))
+        self.updates.append({"label": label, "lr": round(likelihood_ratio, 3),
+                             "posterior": round(self.posterior, 4)})
+        return self.posterior
+
+
+def evaluate(bars: pd.DataFrame, **kwargs) -> dict:
+    if len(bars) < 30:
+        return {"name": "Bayesian", "signal": 0.5, "passed": False,
+                "details": {"error": "Not enough data"}}
+
+    prior = kwargs.get("prior", 0.50)
+    threshold = kwargs.get("threshold", 0.60)
+    u = BayesianUpdater(prior)
+
+    vol = bars["volume"]
+    avg_vol = vol.iloc[-21:-1].mean() if len(vol) > 21 else vol.mean()
+    vol_ratio = vol.iloc[-1] / avg_vol if avg_vol > 0 else 1.0
+    if vol_ratio > 2.0:
+        recent_ret = bars["returns"].tail(3).mean()
+        u.update(1.8 if recent_ret > 0 else 0.6, "volume_spike")
+    else:
+        u.update(1.0, "volume_normal")
+
+    returns = bars["returns"]
+    recent = returns.tail(5).mean()
+    prior_ret = returns.iloc[-10:-5].mean() if len(returns) > 10 else 0
+    if recent > prior_ret and recent > 0:
+        u.update(1.5, "accelerating")
+    elif recent < 0:
+        u.update(0.7, "decelerating")
+    else:
+        u.update(1.0, "neutral")
+
+    current_vol = returns.tail(20).std()
+    hist_vol = returns.std()
+    vol_r = current_vol / (hist_vol + 1e-10)
+    if vol_r < 0.7:
+        u.update(1.2, "low_vol")
+    elif vol_r > 1.3:
+        u.update(0.85, "high_vol")
+    else:
+        u.update(1.0, "normal_vol")
+
+    pos_pct = (returns.tail(10) > 0).sum() / 10
+    if pos_pct > 0.7:
+        u.update(1.6, "strong_uptrend")
+    elif pos_pct < 0.3:
+        u.update(0.5, "strong_downtrend")
+    else:
+        u.update(1.0, "mixed")
+
+    return {
+        "name": "Bayesian",
+        "signal": round(u.posterior, 4),
+        "passed": u.posterior >= threshold,
+        "details": {
+            "prior": prior,
+            "posterior": round(u.posterior, 4),
+            "updates": u.updates,
+            "vol_ratio": round(vol_ratio, 2),
+            "vol_regime": "low" if vol_r < 0.7 else "high" if vol_r > 1.3 else "normal",
+        },
+    }
+
+
+================================================================================
+DATEI: formulas/stoikov.py
+================================================================================
+
+"""
+Formula 6 — Stoikov Execution (Avellaneda-Stoikov)
+Reservation Price: r = mid - q * gamma * sigma^2 * (T - t)
+Bot kauft nur wenn Preis <= Reservation Price.
+"""
+
+import numpy as np
+import pandas as pd
+from config import Config
+
+
+def evaluate(bars: pd.DataFrame, snapshot: dict = None, **kwargs) -> dict:
+    if len(bars) < 20:
+        return {"name": "Stoikov", "signal": 0.0, "passed": False,
+                "details": {"error": "Not enough data"}}
+
+    current_price = bars["close"].iloc[-1]
+
+    if snapshot and snapshot.get("bid") and snapshot.get("ask"):
+        mid = (snapshot["bid"] + snapshot["ask"]) / 2.0
+        spread = snapshot["ask"] - snapshot["bid"]
+    else:
+        mid = current_price
+        spread = current_price * 0.002
+
+    returns = bars["returns"].dropna()
+    sigma = returns.std() * np.sqrt(252 * 78)
+    sigma = max(sigma, 0.01)
+
+    inventory_skew = kwargs.get("inventory_skew", 0.0)
+    gamma = kwargs.get("gamma", Config.STOIKOV_SPREAD_MULT)
+    time_remaining = kwargs.get("time_remaining", 0.5)
+
+    reservation = mid - inventory_skew * gamma * (sigma ** 2) * time_remaining
+
+    price_advantage = (reservation - current_price) / current_price
+    passed = current_price <= reservation
+
+    return {
+        "name": "Stoikov",
+        "signal": round(price_advantage, 5),
+        "passed": passed,
+        "details": {
+            "current_price": round(current_price, 2),
+            "mid_price": round(mid, 2),
+            "reservation_price": round(reservation, 2),
+            "price_advantage": f"{price_advantage:+.3%}",
+            "spread": round(spread, 4),
+            "volatility": round(sigma, 4),
+            "inventory_skew": round(inventory_skew, 2),
+        },
+    }
+
+
+================================================================================
+DATEI: formulas/sentiment.py  (gekuerzt — vollstaendige Datei: 512 Zeilen)
+================================================================================
+
+[Vollstaendige Klassen: NewsFetcher, KeywordScorer, GeminiAnalyzer, SentimentEngine]
+
+Threshold: score > -0.3 (nur blockieren wenn STARK bearish)
+Gemini Rate-Limit: 1 Call pro Minute
+Cache TTL: 15 Minuten
+Gemini Headlines: Top 25 mit Datum fuer Trend-Erkennung
+Kombination: Symbol 50% + Makro 30% + Gemini 20%
+
+
+================================================================================
+DATEI: risk_manager.py
+================================================================================
+
+REGIME_PARAMS:
+  CALM:     stop=2.0xATR  tp=4.0xATR  max_pos=12%  kelly=0.30  max_open=5
+  NORMAL:   stop=2.5xATR  tp=5.0xATR  max_pos=10%  kelly=0.25  max_open=4
+  VOLATILE: stop=3.0xATR  tp=7.5xATR  max_pos=6%   kelly=0.15  max_open=3
+  CRISIS:   stop=4.0xATR  tp=12.0xATR max_pos=3%   kelly=0.10  max_open=2
+
+Kill-Switch: > 15% Drawdown ODER > 5% Tagesverlust -> alle Positionen schliessen
+Bayesian Exit: posterior < 0.30 -> sofort raus
+
+
+================================================================================
+DATEI: broker.py
+================================================================================
+
+Timeouts: 6s pro Bars-Request (ThreadPoolExecutor)
+IEX Blacklist: Symbole ohne Daten werden gecacht (kein Retry bis Neustart)
+yfinance Fallback: wenn IEX keine Daten liefert
+Crypto: BTC/USD Format fuer Alpaca Crypto API
+Extended Hours: Limit-Order 0.1% ueber Marktpreis
+
+
+================================================================================
+DATEI: screener.py (SpikeSensor)
+================================================================================
+
+UNIVERSE: ~145 volatile Symbole (Meme, Biotech, EV, Crypto-Proxies, Cannabis, etc.)
+WebSocket Modus: Echtzeit 1-Min-Bars via alpaca.data.live
+Spike-Trigger: >3% intraday ODER >3x Durchschnittsvolumen
+Micro-Cap Filter: Preis < $0.50 oder Volumen < 50.000 -> ignoriert
+REST-Fallback: Batch-Snapshots alle 60s wenn WebSocket nicht verfuegbar
+Reconnect: exponentieller Backoff 5s -> 120s
+
+
+================================================================================
+DATEI: adaptive.py (AdaptiveLearner)
+================================================================================
+
+Algorithmus: Contextual Bandit (Bayesian Weight Updates)
+Min Trades fuer Lernen: 10 abgeschlossene Trades
+Learning Rate: 0.1 (konservativ)
+Max Trade-History: 500
+Weight-Range: [0.3, 2.0]
+
+Auto-Blacklist: 2x Stop-Loss in 48h -> 7 Tage gesperrt
+Regime-Decay: inaktive Regime zerfallen nach 7 Tagen zurueck zu Default (5%/Tag)
+
+DEFAULT_WEIGHTS:
+  CALM:     Momentum=1.0 Kelly=1.0 EV-Gap=1.0 KL=1.0 Bayesian=1.0 Stoikov=1.0 Sentiment=0.8
+  NORMAL:   alle 1.0, Sentiment=1.0
+  VOLATILE: Momentum=0.8 Kelly=1.2 KL=1.2 Stoikov=1.2 Sentiment=1.3
+  CRISIS:   Momentum=0.6 Kelly=1.3 EV-Gap=0.8 Bayesian=1.2 Stoikov=1.5 Sentiment=1.5
+
+Adaptive Override: wenn 5+/7 bestanden UND gewichteter Score > 0.85 UND genug Daten -> Trade trotz Formeln-Fail
+Learning Summary: alle 2h via Gemini analysiert, in naechste Prompts injiziert
+
+
+================================================================================
+DATEI: market_context.py
+================================================================================
+
+VIXFetcher: yfinance ^VIX, Cache 5min
+LunarCrushFetcher: Crypto Galaxy Score / Sentiment, Cache 10min
+SectorFetcher: SPY/QQQ/XLK/XLF Performance, Cache 10min
+FinnhubClient: Earnings Calendar (blockiert 3 Tage vorher), Insider Transactions
+
+
+================================================================================
+DATEI: telegram_bot.py
+================================================================================
+
+Commands:
+  /start /status /scan /positions /trades /watchlist
+  /add SYMBOL /remove SYMBOL /pause /resume /run /stop
+  /regime /stats /weights /sentiment /screener
+  /closeall (schliesst alle + 15min Sperre)
+  /erklaer (letzter Trade + 2 Versuche + Regime erklaert)
+
+Scan-Intervall in _scan_loop:
+  open:     Config.SCAN_INTERVAL (30s)
+  extended: 60s
+  closed:   120s
+
+
+================================================================================
+DATEI: main.py
+================================================================================
+
+Args: --scan-once / --status / --backtest / --telegram
+Lock-File: /tmp/trading_bot.pid (verhindert doppelte Instanz)
+API-Server: port 5001 (start_api_server)
+Telegram-Thread: Engine laeuft im Daemon-Thread, Bot blockiert Hauptthread
+
+
+================================================================================
+DATEI: engine.py
+================================================================================
+
+ARCHITEKTUR:
+  Schicht 1 (Perception):  7 Formeln parallel (max 8 Worker)
+  Schicht 2 (Reasoning):   Gemini entscheidet vor jeder Order
+  Schicht 3 (Execution):   Alpaca fuehrt Order aus
+
+KASKADEN-LOGIK (TradeSignal.evaluate()):
+  Kelly FAIL -> sofortiger Block (Mandatory-Filter)
+  < 4/7 bestanden -> HOLD, kein Gemini
+  4/7 + Kelly -> Gemini blockierend (warten auf Antwort)
+  5/7 + Kelly -> Express Lane: sofort handeln, Gemini prueft async HOLD/SELL
+  6/7 + Kelly -> Express Lane (75% confidence)
+  7/7 + Kelly -> Express Lane (85% confidence)
+
+WATCHLIST DISCOVERY (WatchlistDiscovery):
+  Interval: alle 10 Minuten
+  Schritt 1: Alpaca Top-50 nach Momentum x Volumen (echte Daten)
+  Schritt 2: Gemini waehlt 15 beste aus dieser Liste (kein Halluzinieren)
+  Fallback: Top-8 direkt von Alpaca wenn Gemini fehlschlaegt
+  Auto-Favorit: 1 Symbol pro Zyklus zur permanenten Watchlist hinzugefuegt
+  Tagesende: Performance-Check, schlechte Symbole entfernt
+
+SCANS:
+  scan_once(): Watchlist + Spikes -> parallel analysieren -> sequenziell ausfuehren
+  Exit-Monitor: separater Thread alle 3s (Stop-Loss / TP / Trailing-Stop)
+  Regime-Update: einmal pro scan_once() via SPY (global, nicht pro Symbol)
+  Learning-Summary: alle 2h im Hintergrund-Thread aktualisiert
+
+SICHERHEITEN:
+  _closing_positions: verhindert Doppel-Close
+  _pending_buys: verhindert Doppel-Buy
+  Earnings-Blackout: Finnhub 3 Tage vorher
+  Auto-Blacklist: 2x SL in 48h -> 7 Tage gesperrt
+  Kill-Switch: > 15% Drawdown oder > 5% Tagesverlust
+  Startup-Review: offene Positionen per Gemini geprueft beim Start
+
+GEMINI TIMEOUTS:
+  approve_trade: 15s (2 Versuche: voller Prompt + kurzer Prompt)
+  Fallback: >= 6/7 -> Auto-Approve | < 6/7 -> Block
+
+KENNZAHLEN (aktuell):
+  KELLY_FRACTION:           0.25 (Quarter Kelly)
+  MIN_MOMENTUM_SCORE:       0.50
+  KL_DIVERGENCE_THRESHOLD:  0.15
+  MIN_BAYESIAN_POSTERIOR:   0.60
+  REASONING_MIN_CONFIDENCE: 0.55 (55%)
+  Kelly passed threshold:   adjusted > 0.005
+  TRADING_TIMEFRAME:        1Hour (Swing Trading)
+
+================================================================================
+KELLY FILTER ANALYSE — Warum er oft FAIL zeigt:
+================================================================================
+
+Kelly FAIL tritt auf wenn:
+  adjusted_kelly <= 0.005
+
+Das passiert wenn:
+  1. win_prob zu niedrig (< ~52% der letzten Candles bullish)
+  2. payoff_ratio zu gering (avg_gain / avg_loss nach Kosten zu klein)
+  3. Kosten fressen den Gewinn auf (bei Penny Stocks: 50-100 bps Slippage!)
+
+Berechnung:
+  recent = letzte 33% der Bars (Trend-Kontext)
+  win_prob = Anteil positive Returns in 'recent'
+  full_kelly = (win_prob * payoff - (1-win_prob)) / payoff
+  adjusted = full_kelly * 0.25  (Quarter Kelly)
+  passed = adjusted > 0.005
+
+Bei 1-Hour Timeframe:
+  Weniger Bars pro Tag -> win_prob schwankt staerker
+  Geringere Trefferquote als bei 5-Min Bars
+  -> Empfehlung: Kelly-Threshold pruefen oder KELLY_FRACTION erhoehen
+
+================================================================================
+ENDE DES CODE-STANDS
+================================================================================
