@@ -593,9 +593,8 @@ class TradingTelegramBot:
         await update.message.reply_text(f"🔬 Teste <b>{symbol}</b> durch alle 7 Layer...", parse_mode="HTML")
 
         try:
-            broker = AlpacaBroker()
             from engine import Engine
-            engine = Engine(broker)
+            engine = Engine()
             signal = engine.analyze_symbol(symbol)
 
             # Header
