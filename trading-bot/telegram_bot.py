@@ -480,7 +480,7 @@ class TradingTelegramBot:
                     atr = compute_atr(bars) if not bars.empty else 0.0
                     entry = pos["avg_entry"]
                     current = pos["unrealized_plpc"]
-                    stops = risk.calculate_stops(entry, atr)
+                    stops = risk.compute_stops(entry, atr)
 
                     plpc = pos["unrealized_plpc"]
                     pl_icon = "🟢" if plpc >= 0 else "🔴"
@@ -498,6 +498,28 @@ class TradingTelegramBot:
             lines.append(f"━━━━━━━━━━━━━━━━━━━━━━\nRegime: {risk.regime.value}")
             await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
+        except Exception as e:
+            await update.message.reply_text(f"Error: {e}")
+
+    async def cmd_orders(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Zeigt alle offenen Orders (noch nicht gefüllt)."""
+        try:
+            broker = AlpacaBroker()
+            orders = broker.api.list_orders(status="open")
+            if not orders:
+                await update.message.reply_text("Keine offenen Orders.")
+                return
+            lines = ["<b>📋 Offene Orders</b>", "━━━━━━━━━━━━━━━━━━━━━━"]
+            for o in orders:
+                side_icon = "🟢" if o.side == "buy" else "🔴"
+                qty = o.qty or "?"
+                limit_price = f"@ ${float(o.limit_price):.2f}" if o.limit_price else "(market)"
+                lines.append(
+                    f"{side_icon} <b>{o.symbol}</b> {o.side.upper()} {qty}x {limit_price}\n"
+                    f"  Typ: {o.order_type} | Status: {o.status}\n"
+                    f"  ID: <code>{o.id}</code>"
+                )
+            await update.message.reply_text("\n".join(lines), parse_mode="HTML")
         except Exception as e:
             await update.message.reply_text(f"Error: {e}")
 
@@ -879,6 +901,7 @@ Antworte NUR mit JSON:
         self.app.add_handler(CommandHandler("erklaer", self.cmd_erklaer))
         self.app.add_handler(CommandHandler("test", self.cmd_test))
         self.app.add_handler(CommandHandler("stoplosses", self.cmd_stoplosses))
+        self.app.add_handler(CommandHandler("orders", self.cmd_orders))
 
         logger.info("Telegram bot running. Send /start to begin.")
         self.app.run_polling(drop_pending_updates=True)
