@@ -804,8 +804,12 @@ class TradeSignal:
             lines.append(f"  {name:<16} {status:<8} signal={r['signal']}")
         lines.append(f"{'-' * 60}")
         if self.all_passed:
-            lines.append(f"  LAYER 2: REASONING  -> Gemini entscheidet...")
-            lines.append(f"  LAYER 3: EXECUTION  -> Qty: {self.qty}")
+            if self.cascade_level >= 5:
+                lines.append(f"  LAYER 2: REASONING  -> Express Lane ({self.cascade_level}/7) — kein Gemini-Block")
+                lines.append(f"  LAYER 3: EXECUTION  -> Qty: {self.qty}")
+            else:
+                lines.append(f"  LAYER 2: REASONING  -> Gemini entscheidet... (blockierend)")
+                lines.append(f"  LAYER 3: EXECUTION  -> Qty: {self.qty}  ⏳ wartet auf Gemini")
         else:
             lines.append(f"  > HOLD (Perception Layer blockiert)")
         lines.append(f"  > REASON: {self.reason}")
@@ -1457,9 +1461,17 @@ class Engine:
             )
             if reasoning["risk_factors"]:
                 logger.warning(f"  Risiken: {', '.join(reasoning['risk_factors'])}")
+            prob = reasoning.get('probability_pct', round(reasoning['confidence'] * 100))
+            print(f"  > GEMINI: HOLD — {prob}% — {reasoning['reason']}")
+            if reasoning["risk_factors"]:
+                print(f"  > RISIKEN: {', '.join(reasoning['risk_factors'])}")
+            print(f"{'=' * 60}\n")
             self._log_scan_attempt(signal, price, reasoning, executed=False)
             return None
 
+        prob = reasoning.get('probability_pct', round(reasoning['confidence'] * 100))
+        print(f"  > GEMINI: BUY ✓ — {prob}% — {reasoning['reason']}")
+        print(f"{'=' * 60}\n")
         logger.info(f"{'=' * 40}")
         logger.info(f"EXECUTING: BUY {signal.qty}x {signal.symbol}")
         logger.info(f"Regime: {self.risk.regime.value} | {self.risk.params['description']}")
