@@ -1639,6 +1639,15 @@ class Engine:
                             continue
                         self._closing_positions.add(symbol)
 
+                    pl_icon = "🟢" if plpc >= 0 else "🔴"
+                    self._tg(
+                        f"{pl_icon} <b>EXIT: {symbol}</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"Grund:    <b>{exit_decision['reason']}</b>\n"
+                        f"P/L:      <b>{plpc:+.1%}</b>\n"
+                        f"Einstieg: ${entry_price:.2f} → Aktuell: ${current_price:.2f}\n"
+                        f"Regime:   {self.risk.regime.value}"
+                    )
                     self.broker.close_position(symbol)
                     self.position_highs.pop(symbol, None)
 
