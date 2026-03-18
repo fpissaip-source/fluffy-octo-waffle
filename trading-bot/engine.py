@@ -1466,6 +1466,13 @@ class Engine:
             if reasoning["risk_factors"]:
                 print(f"  > RISIKEN: {', '.join(reasoning['risk_factors'])}")
             print(f"{'=' * 60}\n")
+            risk_str = f"\nRisiken: {', '.join(reasoning['risk_factors'])}" if reasoning["risk_factors"] else ""
+            self._tg(
+                f"🚫 <b>GEMINI: HOLD — {signal.symbol}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Kaskade: <b>{signal.cascade_label}</b>\n"
+                f"Gemini: {prob}% — {reasoning['reason']}{risk_str}"
+            )
             self._log_scan_attempt(signal, price, reasoning, executed=False)
             return None
 
