@@ -338,8 +338,7 @@ SELL = Sofort verkaufen (Setup hat einen kritischen Fehler / Marktlage hat sich 
         """
         market_context_str = self.market_ctx.format_for_prompt(symbol)
 
-        prompt = f"""Du bist ein erfahrener Trader. Der Trading-Bot wurde neu gestartet (Absturz oder manueller Neustart).
-Die folgende Position war beim Neustart noch offen und wurde in der Zwischenzeit NICHT ueberwacht.
+        prompt = f"""Du bist ein erfahrener Trader. Bewerte die folgende offene Position objektiv.
 
 SYMBOL: {symbol}
 EINSTIEG: ${entry_price:.2f}  |  AKTUELL: ${current_price:.2f}  |  P/L: {pnl_pct:+.2f}%
@@ -349,16 +348,11 @@ MARKT-REGIME: {regime}
 MARKT-KONTEXT:
 {market_context_str}
 
-Wichtige Fragen die du beantworten sollst:
-- Ist die aktuelle P/L akzeptabel oder gefaehrlich?
-- Hat sich der Markt gegen diese Position gedreht?
-- Ist das Risiko ohne aktive Ueberwachung zu hoch?
+Entscheide auf Basis der aktuellen Marktlage und P/L:
+HOLD = Position halten (kein klarer technischer Grund zum Verkauf)
+SELL = Sofort schliessen (Stop Loss unterschritten, Markt klar gedreht, oder P/L kritisch negativ)
 
-Bei Zweifeln gilt: SELL ist sicherer als eine unkontrollierte Position zu halten.
-HOLD nur wenn das Setup klar valide ist und das Risiko ueberschaubar bleibt.
-
-HOLD = Position weiterlaufen lassen (Setup ist valide, Risiko kontrolliert)
-SELL = Sofort schliessen (zu riskant, Markt hat sich gedreht, oder Unsicherheit zu hoch)"""
+Ein Neustart des Bots allein ist KEIN Grund fuer SELL. Verkaufe nur bei echten technischen Gruenden."""
 
         try:
             from google.genai import types as genai_types
@@ -397,7 +391,7 @@ SELL = Sofort schliessen (zu riskant, Markt hat sich gedreht, oder Unsicherheit 
                 logger.warning(f"[STARTUP-REVIEW] {symbol}: JSON truncated, decision extracted: {decision}")
                 result = {"decision": decision, "confidence": 0.5, "reason": "JSON truncated", "risk_factors": []}
 
-            should_sell = result.get("decision", "SELL") == "SELL"  # Default SELL bei Unsicherheit
+            should_sell = result.get("decision", "HOLD") == "SELL"  # Default HOLD — Neustart kein Verkaufsgrund
             logger.info(
                 f"[STARTUP-REVIEW] {symbol}: {result.get('decision')} "
                 f"({result.get('confidence', 0):.0%}) — {result.get('reason', '')}"
