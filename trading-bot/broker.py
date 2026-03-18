@@ -309,7 +309,33 @@ class AlpacaBroker:
 
     def close_position(self, symbol: str) -> Optional[str]:
         try:
-            order = self.api.close_position(symbol)
+            market_status = self.get_market_status()
+            crypto = symbol.upper().endswith("USD") and not symbol.upper().endswith("BUSD")
+
+            if crypto:
+                # Crypto: GTC Market-Order (24/7)
+                order = self.api.submit_order(
+                    symbol=symbol, side="sell", type="market",
+                    time_in_force="gtc", qty=self._get_position_qty(symbol),
+                )
+            elif market_status == "extended":
+                # Extended Hours: Limit-Order zum aktuellen Bid (wird sofort gefüllt)
+                snap = self.get_snapshot(symbol)
+                bid = snap.get("bid") if snap else None
+                qty = self._get_position_qty(symbol)
+                if bid and bid > 0 and qty:
+                    order = self.api.submit_order(
+                        symbol=symbol, qty=qty, side="sell",
+                        type="limit", time_in_force="day",
+                        limit_price=round(bid, 2),
+                        extended_hours=True,
+                    )
+                else:
+                    order = self.api.close_position(symbol)
+            else:
+                # Reguläre Marktzeiten: Market-Order
+                order = self.api.close_position(symbol)
+
             logger.info(f"CLOSE {symbol} -> Order {order.id}")
             return order.id
         except Exception as e:
@@ -317,6 +343,14 @@ class AlpacaBroker:
                 logger.info(f"CLOSE {symbol}: Position bereits geschlossen — ignoriert")
             else:
                 logger.error(f"Close failed {symbol}: {e}")
+            return None
+
+    def _get_position_qty(self, symbol: str) -> Optional[int]:
+        """Gibt die aktuelle Qty einer Position zurück."""
+        try:
+            pos = self.api.get_position(symbol)
+            return int(float(pos.qty))
+        except Exception:
             return None
 
     def get_snapshots_batch(self, symbols: list) -> dict:
