@@ -40,8 +40,6 @@ class AlpacaBroker:
             key_id=Config.API_KEY,
             secret_key=Config.SECRET_KEY,
             base_url=Config.BASE_URL,
-            retry=1,       # Standard war 3 — reduziert Wartezeit von 9s auf 3s pro Timeout
-            retry_wait=1,  # 1s statt 3s zwischen Retries
         )
         self._validate_connection()
 
