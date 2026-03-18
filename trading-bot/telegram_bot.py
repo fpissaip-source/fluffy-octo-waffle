@@ -418,14 +418,15 @@ class TradingTelegramBot:
 
         await update.message.reply_text(msg1, parse_mode="HTML")
 
-        # ── 2. LETZTE 2 SCAN-VERSUCHE (alle, auch abgelehnte) ────────────
+        # ── 2. LETZTE 2 GEMINI-ENTSCHEIDUNGEN (BUY + HOLD, egal) ────────────
         try:
             attempts = []
             if self.engine and hasattr(self.engine, "scan_attempts"):
-                attempts = self.engine.scan_attempts[-2:]
+                gemini_attempts = [a for a in self.engine.scan_attempts if a.get("gemini_used")]
+                attempts = gemini_attempts[-2:]
 
             if attempts:
-                parts = ["<b>2. LETZTE 2 SCAN-VERSUCHE</b>\n━━━━━━━━━━━━━━━━━━━━━━"]
+                parts = ["<b>2. LETZTE 2 GEMINI-ENTSCHEIDUNGEN</b>\n━━━━━━━━━━━━━━━━━━━━━━"]
                 for i, a in enumerate(reversed(attempts), 1):
                     ts = str(a.get("timestamp", "?"))[:16].replace("T", " ")
                     sym = a.get("symbol", "?")
@@ -460,7 +461,7 @@ class TradingTelegramBot:
                     )
                 msg2 = "\n".join(parts)
             else:
-                msg2 = "<b>2. LETZTE 2 SCAN-VERSUCHE</b>\n━━━━━━━━━━━━━━━━━━━━━━\nNoch keine Scan-Daten (Bot muss laufen)."
+                msg2 = "<b>2. LETZTE 2 GEMINI-ENTSCHEIDUNGEN</b>\n━━━━━━━━━━━━━━━━━━━━━━\nNoch keine Gemini-Entscheidungen (Bot muss laufen, mind. 4/7 Kaskade nötig)."
         except Exception as e:
             msg2 = f"<b>2. LETZTE 2 SCAN-VERSUCHE</b>\nFehler: {e}"
 
