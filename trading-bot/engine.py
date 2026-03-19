@@ -844,6 +844,9 @@ class Engine:
         self._candidate_queue: list[dict] = []      # [{"symbol": ..., "signal": ..., "ts": ...}]
         self._candidate_lock = threading.Lock()
         self._MAX_CANDIDATES = 5                    # Maximal 5 Kandidaten speichern
+        # Duplikat-Schutz fuer SIGNAL-Telegram-Notifications (verhindert Spam bei Order-Fehlern)
+        self._signal_notified: dict[str, float] = {}  # symbol -> timestamp der letzten Notification
+        self._SIGNAL_COOLDOWN = 300  # 5 Minuten Cooldown pro Symbol
         # Telegram-Callback (optional): wird von TradingTelegramBot gesetzt
         self.notify: Optional[callable] = None
 
@@ -1485,20 +1488,24 @@ class Engine:
         logger.info(f"Gemini: {reasoning.get('probability_pct', round(reasoning['confidence']*100))}% — {reasoning['reason']}")
         logger.info(f"{'=' * 40}")
 
-        # ── PRE-TRADE Telegram Alert ──
-        passed_names  = [n for n, r in signal.results.items() if r["passed"]]
-        failed_names  = [n for n, r in signal.results.items() if not r["passed"]]
-        self._tg(
-            f"⚡ <b>SIGNAL: BUY {signal.qty}x {signal.symbol}</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"Kaskade: <b>{signal.cascade_label}</b>\n"
-            f"Regime:  {self.risk.regime.value}\n"
-            f"Preis:   ${price:.2f}\n"
-            f"Wert:    ~${signal.qty * price:,.0f}\n"
-            f"✅ {', '.join(passed_names)}\n"
-            + (f"❌ {', '.join(failed_names)}\n" if failed_names else "")
-            + f"<i>Order wird jetzt platziert...</i>"
-        )
+        # ── PRE-TRADE Telegram Alert (mit Cooldown gegen Duplikat-Spam) ──
+        now_ts = time.time()
+        last_notified = self._signal_notified.get(signal.symbol, 0)
+        if now_ts - last_notified >= self._SIGNAL_COOLDOWN:
+            passed_names  = [n for n, r in signal.results.items() if r["passed"]]
+            failed_names  = [n for n, r in signal.results.items() if not r["passed"]]
+            self._tg(
+                f"⚡ <b>SIGNAL: BUY {signal.qty}x {signal.symbol}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Kaskade: <b>{signal.cascade_label}</b>\n"
+                f"Regime:  {self.risk.regime.value}\n"
+                f"Preis:   ${price:.2f}\n"
+                f"Wert:    ~${signal.qty * price:,.0f}\n"
+                f"✅ {', '.join(passed_names)}\n"
+                + (f"❌ {', '.join(failed_names)}\n" if failed_names else "")
+                + f"<i>Order wird jetzt platziert...</i>"
+            )
+            self._signal_notified[signal.symbol] = now_ts
 
         # Stoikov self-deciding: Limit-Order wenn Reservation Price verfuegbar
         stoikov_result = signal.results.get("Stoikov", {})
@@ -1524,6 +1531,8 @@ class Engine:
             self.trade_log.append(signal)
             self.position_highs[signal.symbol] = price
             self._log_scan_attempt(signal, price, reasoning, executed=True)
+            # Cooldown nach erfolgreicher Order zurücksetzen (nächster Trade soll wieder notifiziert werden)
+            self._signal_notified.pop(signal.symbol, None)
 
             # ── ORDER PLACED Telegram Alert ──
             order_type = "LIMIT" if (signal.results.get("Stoikov", {}).get("passed") and

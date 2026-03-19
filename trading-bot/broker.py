@@ -257,7 +257,8 @@ class AlpacaBroker:
     def market_buy(self, symbol: str, qty: int) -> Optional[str]:
         try:
             status = self.get_market_status()
-            if status == "extended":
+            is_crypto = symbol.upper() in CRYPTO_SYMBOLS
+            if status == "extended" and not is_crypto:
                 # Extended hours: Limit-Order leicht über Marktpreis (0.1% Slippage)
                 price = self.get_latest_price(symbol)
                 if not price:
@@ -271,6 +272,12 @@ class AlpacaBroker:
                     extended_hours=True,
                 )
                 logger.info(f"BUY {qty}x {symbol} @ LIMIT ${limit_price:.2f} [EXT] -> Order {order.id}")
+            elif is_crypto:
+                # Crypto: GTC (Alpaca unterstützt kein "day" für Crypto-Market-Orders)
+                order = self.api.submit_order(
+                    symbol=symbol, qty=qty, side="buy", type="market", time_in_force="gtc",
+                )
+                logger.info(f"BUY {qty}x {symbol} @ MARKET [CRYPTO GTC] -> Order {order.id}")
             else:
                 order = self.api.submit_order(
                     symbol=symbol, qty=qty, side="buy", type="market", time_in_force="day",
