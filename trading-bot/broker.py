@@ -99,6 +99,20 @@ class AlpacaBroker:
             logger.warning(f"cancel_open_buy_orders({symbol}): {e}")
             return 0
 
+    def cancel_open_sell_orders(self, symbol: str) -> int:
+        """Storniert alle offenen Sell-Orders für ein Symbol. Gibt Anzahl zurück."""
+        try:
+            orders = self.api.list_orders(status="open", symbols=[symbol])
+            cancelled = 0
+            for o in orders:
+                if o.side == "sell":
+                    self.api.cancel_order(o.id)
+                    cancelled += 1
+            return cancelled
+        except Exception as e:
+            logger.warning(f"cancel_open_sell_orders({symbol}): {e}")
+            return 0
+
     def get_bars(self, symbol: str, timeframe: str = "5Min", limit: int = 100) -> pd.DataFrame:
         global _iex_blacklist
 
@@ -335,8 +349,8 @@ class AlpacaBroker:
                 # Fallback-Kette: Echtzeit > Bid aus Snapshot
                 limit_price = live or bid
                 if limit_price and limit_price > 0 and qty:
-                    # 0.5% unter aktuellem Preis → sofortiger Fill im Pre/After-Market
-                    limit_price = round(limit_price * 0.995, 2)
+                    # 1.5% unter aktuellem Preis → aggressiver Fill im Pre/After-Market
+                    limit_price = round(limit_price * 0.985, 2)
                     order = self.api.submit_order(
                         symbol=symbol, qty=qty, side="sell",
                         type="limit", time_in_force="day",

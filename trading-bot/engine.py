@@ -837,8 +837,10 @@ class Engine:
         self._exit_lock = threading.Lock()
         self._stop_event = threading.Event()
         # Schutz gegen Doppel-Close und Doppel-Buy
-        self._closing_positions: set[str] = set()  # Symbole mit laufendem Close-Order
-        self._pending_buys: set[str] = set()        # Symbole mit laufendem Buy-Order
+        self._closing_positions: set[str] = set()    # Symbole mit laufendem Close-Order
+        self._close_order_ts: dict[str, float] = {}  # symbol -> Zeitpunkt der Close-Order
+        self._STALE_ORDER_TIMEOUT = 600              # 10 Min → Cancel + neu bewerten
+        self._pending_buys: set[str] = set()         # Symbole mit laufendem Buy-Order
         self._order_lock = threading.Lock()
         # Kandidaten-Queue: gute Signale die wegen fehlendem Cash warten
         self._candidate_queue: list[dict] = []      # [{"symbol": ..., "signal": ..., "ts": ...}]
@@ -864,6 +866,7 @@ class Engine:
             if symbol in self._closing_positions:
                 return False
             self._closing_positions.add(symbol)
+            self._close_order_ts[symbol] = time.time()
         self.broker.close_position(symbol)
         self.position_highs.pop(symbol, None)
         return True
@@ -1619,6 +1622,7 @@ class Engine:
                 with self._order_lock:
                     if symbol not in self._closing_positions:
                         self._closing_positions.add(symbol)
+                        self._close_order_ts[symbol] = time.time()
                         self.broker.close_position(symbol)
             return
 
@@ -1627,11 +1631,29 @@ class Engine:
                 # Kein doppelter Close wenn bereits eine Order laeuft
                 with self._order_lock:
                     if symbol in self._closing_positions:
-                        # Prüfen ob Sell-Order noch aktiv — sonst Sperre aufheben
                         if self.broker.has_open_order(symbol, side="sell"):
-                            continue
+                            # Stale-Order Check: nach X Minuten canceln und neu bewerten
+                            order_age = time.time() - self._close_order_ts.get(symbol, time.time())
+                            if order_age >= self._STALE_ORDER_TIMEOUT:
+                                cancelled = self.broker.cancel_open_sell_orders(symbol)
+                                self._closing_positions.discard(symbol)
+                                self._close_order_ts.pop(symbol, None)
+                                age_min = int(order_age / 60)
+                                logger.warning(
+                                    f"[STALE ORDER] {symbol}: {cancelled} Sell-Order(s) nach "
+                                    f"{age_min}min gecancelt — Exit wird neu bewertet"
+                                )
+                                self._tg(
+                                    f"⏱ <b>Stale Sell-Order gecancelt:</b> {symbol}\n"
+                                    f"Order war {age_min}min offen ohne Fill.\n"
+                                    f"Exit-Bedingungen werden neu geprüft..."
+                                )
+                                # Fall through → Exit neu bewerten
+                            else:
+                                continue
                         else:
                             self._closing_positions.discard(symbol)
+                            self._close_order_ts.pop(symbol, None)
 
                 bars = self.broker.get_bars(symbol, timeframe=Config.TRADING_TIMEFRAME, limit=50)
 
