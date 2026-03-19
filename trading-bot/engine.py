@@ -852,6 +852,9 @@ class Engine:
         self._SIGNAL_COOLDOWN = 300  # 5 Minuten Cooldown pro Symbol
         # Native Stop-Loss Orders: symbol -> order_id (bei Alpaca hinterlegt)
         self._native_stop_orders: dict[str, str] = {}
+        # Exit-Notification Deduplication: verhindert mehrfache Telegram-Exits
+        self._exit_notified: dict[str, float] = {}  # symbol -> timestamp
+        self._EXIT_NOTIFY_COOLDOWN = 120  # 2 Minuten Cooldown pro Symbol
         # Telegram-Callback (optional): wird von TradingTelegramBot gesetzt
         self.notify: Optional[callable] = None
 
@@ -1690,8 +1693,11 @@ class Engine:
                             else:
                                 continue
                         else:
+                            # Keine offene Sell-Order: Order wurde gefüllt oder fehlgeschlagen.
+                            # Position-API kann noch veraltet sein → nicht erneut triggern.
                             self._closing_positions.discard(symbol)
                             self._close_order_ts.pop(symbol, None)
+                            continue
 
                 bars = self.broker.get_bars(symbol, timeframe=Config.TRADING_TIMEFRAME, limit=50)
 
@@ -1745,16 +1751,21 @@ class Engine:
                             continue
                         self._closing_positions.add(symbol)
 
-                    pl_icon = "🟢" if plpc >= 0 else "🔴"
-                    self._tg(
-                        f"{pl_icon} <b>EXIT: {symbol}</b>\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"Grund:    <b>{exit_decision['reason']}</b>\n"
-                        f"P/L:      <b>{plpc:+.1%}</b>\n"
-                        f"Einstieg: ${entry_price:.2f} → Aktuell: ${current_price:.2f}\n"
-                        f"Regime:   {self.risk.regime.value}"
-                    )
+                    self._cancel_native_stop(symbol)
                     self.broker.close_position(symbol)
+
+                    pl_icon = "🟢" if plpc >= 0 else "🔴"
+                    now_ts = time.time()
+                    if now_ts - self._exit_notified.get(symbol, 0) >= self._EXIT_NOTIFY_COOLDOWN:
+                        self._exit_notified[symbol] = now_ts
+                        self._tg(
+                            f"{pl_icon} <b>EXIT: {symbol}</b>\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"Grund:    <b>{exit_decision['reason']}</b>\n"
+                            f"P/L:      <b>{plpc:+.1%}</b>\n"
+                            f"Einstieg: ${entry_price:.2f} → Aktuell: ${current_price:.2f}\n"
+                            f"Regime:   {self.risk.regime.value}"
+                        )
                     self.position_highs.pop(symbol, None)
 
                     # ── Adaptive Learning: Record Exit ──
