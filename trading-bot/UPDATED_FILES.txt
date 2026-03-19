@@ -1,3 +1,1159 @@
+================================================================================
+UPDATED_FILES.txt — Trading Bot Vollstaendiger Code
+Stand: 2026-03-18 (alle Fixes + Startup Position Review)
+================================================================================
+
+ALLE AENDERUNGEN:
+1. main.py        — Telegram startet sofort, Engine im Hintergrund
+2. telegram_bot.py — Engine-Instanz wird geteilt
+3. risk_manager.py — Regime-TTL 5min (kein Flip pro Symbol)
+4. engine.py      — Doppel-Close/Buy Schutz + Startup Position Review
+
+UPDATE AUF SERVER:
+  cd /root/bot
+  git pull origin claude/fix-telegram-bot-aTUv8
+  pkill -f "python main.py"; sleep 1
+  cd trading-bot && python main.py
+
+LIVE CREDENTIALS (.env anpassen, NICHT in git committen!):
+  ALPACA_BASE_URL=https://api.alpaca.markets
+  ALPACA_API_KEY=<dein_key>
+  ALPACA_SECRET_KEY=<dein_secret>
+
+================================================================================
+================================================================================
+DATEI: main.py
+================================================================================
+
+#!/usr/bin/env python3
+"""
+main.py — SIX FILTERS. ONE TRADE.
+
+Usage:
+    python main.py              # Bot starten (Endlosschleife)
+    python main.py --scan-once  # Einmaliger Scan
+    python main.py --status     # Account Status
+    python main.py --backtest   # Quick Analyse
+"""
+
+import os
+import sys
+import logging
+import argparse
+
+from config import Config
+from engine import Engine
+from broker import AlpacaBroker
+
+
+def setup_logging():
+    level = getattr(logging, Config.LOG_LEVEL.upper(), logging.INFO)
+    fmt = "%(asctime)s | %(name)-12s | %(levelname)-7s | %(message)s"
+    logging.basicConfig(level=level, format=fmt, datefmt="%H:%M:%S")
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("websocket").setLevel(logging.WARNING)
+
+
+def cmd_status():
+    broker = AlpacaBroker()
+    equity = broker.get_equity()
+    cash = broker.get_cash()
+    bp = broker.get_buying_power()
+    positions = broker.get_positions()
+
+    print(f"\n{'=' * 50}")
+    print(f"  ACCOUNT STATUS  ({'PAPER' if Config.is_paper() else 'LIVE'})")
+    print(f"{'=' * 50}")
+    print(f"  Equity:        ${equity:,.2f}")
+    print(f"  Cash:          ${cash:,.2f}")
+    print(f"  Buying Power:  ${bp:,.2f}")
+    print(f"  Positions:     {len(positions)}")
+    print(f"{'-' * 50}")
+    if positions:
+        for sym, pos in positions.items():
+            pl = pos['unrealized_pl']
+            plpc = pos['unrealized_plpc']
+            pre = "+" if pl >= 0 else ""
+            print(f"  {sym:<8} {pos['qty']:>6} shares @ ${pos['avg_entry']:.2f}"
+                  f"  {pre}${pl:.2f} ({pre}{plpc:.1%})")
+    else:
+        print("  No open positions.")
+    print(f"{'=' * 50}\n")
+
+
+def cmd_backtest():
+    print(f"\n{'=' * 50}")
+    print(f"  QUICK ANALYSIS")
+    print(f"{'=' * 50}\n")
+    engine = Engine()
+    for symbol in Config.WATCHLIST:
+        try:
+            signal = engine.analyze_symbol(symbol)
+            print(signal.summary())
+            for name, r in signal.results.items():
+                d = r.get("details", {})
+                detail_str = "  ".join(f"{k}={v}" for k, v in d.items()
+                                       if k not in ("error", "updates"))
+                if detail_str:
+                    print(f"    {name}: {detail_str}")
+            print()
+        except Exception as e:
+            print(f"  {symbol}: Error - {e}\n")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Six Filters. One Trade.")
+    parser.add_argument("--scan-once", action="store_true", help="Single scan")
+    parser.add_argument("--status", action="store_true", help="Account status")
+    parser.add_argument("--backtest", action="store_true", help="Quick analysis")
+    parser.add_argument("--telegram", action="store_true", help="Start with Telegram control")
+    args = parser.parse_args()
+
+    setup_logging()
+
+    if not Config.validate():
+        print("\n  API Keys nicht konfiguriert!")
+        print("  1. cp .env.example .env")
+        print("  2. Trage deine Alpaca Keys in .env ein")
+        print("  3. Starte erneut\n")
+        sys.exit(1)
+
+    print()
+    print("  +==========================================+")
+    print("  |   SIX FILTERS. ONE TRADE.               |")
+    print("  |   Quantitative Trading Engine v1.0       |")
+    print("  +==========================================+")
+    print()
+
+    if args.status:
+        cmd_status()
+    elif args.scan_once:
+        e = Engine()
+        Engine().scan_once(market_open=e.broker.is_market_open())
+    elif args.backtest:
+        cmd_backtest()
+    else:
+        import threading
+        from api import start_api_server
+
+        telegram_configured = (
+            Config.TELEGRAM_TOKEN
+            and Config.TELEGRAM_TOKEN != "your_telegram_bot_token_here"
+            and Config.TELEGRAM_CHAT_ID
+        )
+
+        if telegram_configured:
+            # Telegram-Bot ZUERST starten — antwortet sofort auf Nachrichten
+            # Engine laeuft im Hintergrund (Initialisierung kann dauern)
+            from telegram_bot import TradingTelegramBot
+            bot = TradingTelegramBot()
+
+            def _engine_thread():
+                try:
+                    eng = Engine()
+                    start_api_server(broker=eng.broker, port=int(os.getenv("BOT_API_PORT", "5001")))
+                    eng.notify = bot.send_sync
+                    bot.engine = eng
+                    bot.is_running = True
+                    bot.send_sync("✅ Trading Engine bereit. /status fuer Account-Info.")
+                    eng.run()
+                except Exception as e:
+                    bot.send_sync(f"❌ Engine Fehler beim Start: {e}")
+
+            t = threading.Thread(target=_engine_thread, daemon=True, name="engine")
+            t.start()
+            bot.run()  # Blockiert im Hauptthread — bot antwortet schon ab hier
+        elif args.telegram:
+            print("  Telegram nicht konfiguriert!")
+            print("  Trage TELEGRAM_TOKEN und TELEGRAM_CHAT_ID in .env ein.")
+            print("  Siehe README fuer Anleitung.\n")
+            sys.exit(1)
+        else:
+            engine = Engine()
+            start_api_server(broker=engine.broker, port=int(os.getenv("BOT_API_PORT", "5001")))
+            engine.run()
+
+
+if __name__ == "__main__":
+    main()
+
+
+================================================================================
+DATEI: telegram_bot.py
+================================================================================
+
+"""
+telegram_bot.py — Steuere den Trading-Bot vom iPhone via Telegram.
+
+Befehle:
+    /start        - Bot starten + Uebersicht
+    /status       - Account Status (Equity, Positionen)
+    /scan         - Einmal alle Symbole scannen
+    /positions    - Offene Positionen anzeigen
+    /trades       - Heutige Trades anzeigen
+    /watchlist    - Aktuelle Watchlist
+    /add TSLA     - Symbol zur Watchlist hinzufuegen
+    /remove TSLA  - Symbol von Watchlist entfernen
+    /pause        - Bot pausieren
+    /resume       - Bot fortsetzen
+    /stop         - Bot komplett stoppen
+    /screener     - Top-Mover Screener (penny/micro/sub)
+"""
+
+import asyncio
+import logging
+import threading
+import time
+from datetime import datetime
+from typing import Optional
+
+from telegram import Update, Bot
+from telegram.ext import Application, CommandHandler, ContextTypes
+
+from config import Config
+from broker import AlpacaBroker
+from engine import Engine, TradeSignal
+from risk_manager import RiskManager, compute_atr
+
+logger = logging.getLogger("bot.telegram")
+
+
+class TradingTelegramBot:
+    def __init__(self, engine: Optional[Engine] = None):
+        self.token = Config.TELEGRAM_TOKEN
+        self.chat_id = Config.TELEGRAM_CHAT_ID
+        self.engine: Optional[Engine] = engine
+        self.is_running = engine is not None
+        self.is_paused = False
+        self.scan_thread: Optional[threading.Thread] = None
+        self.app: Optional[Application] = None
+        self._bot: Optional[Bot] = None
+
+    # ── Nachrichten senden ──────────────────────────────
+
+    async def send(self, text: str, parse_mode: str = "HTML"):
+        """Nachricht an dein iPhone senden."""
+        try:
+            if self._bot:
+                await self._bot.send_message(
+                    chat_id=self.chat_id,
+                    text=text,
+                    parse_mode=parse_mode,
+                )
+        except Exception as e:
+            logger.error(f"Telegram send failed: {e}")
+
+    def send_sync(self, text: str):
+        """Synchrone Version fuer Threads."""
+        try:
+            import requests
+            url = f"https://api.telegram.org/bot{self.token}/sendMessage"
+            requests.post(url, json={
+                "chat_id": self.chat_id,
+                "text": text,
+                "parse_mode": "HTML",
+            }, timeout=10)
+        except Exception as e:
+            logger.error(f"Telegram sync send failed: {e}")
+
+    # ── Commands ────────────────────────────────────────
+
+    async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        text = (
+            "<b>SIX FILTERS. ONE TRADE.</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "Trading Engine v2.0 bereit.\n\n"
+            "<b>Monitoring:</b>\n"
+            "/status  — Account anzeigen\n"
+            "/positions — Offene Positionen\n"
+            "/regime  — Markt-Regime + Risk\n"
+            "/sentiment AAPL — News-Analyse\n\n"
+            "<b>Trading:</b>\n"
+            "/scan    — Einmal scannen\n"
+            "/run     — Auto-Scan starten\n"
+            "/pause   — Bot pausieren\n"
+            "/resume  — Bot fortsetzen\n"
+            "/stop    — Auto-Scan stoppen\n\n"
+            "<b>Analyse:</b>\n"
+            "/stats   — Performance-Stats\n"
+            "/weights — Gelernte Gewichte\n"
+            "/trades  — Heutige Trades\n\n"
+            "<b>Screener:</b>\n"
+            "/screener       — Top-Mover (alle)\n"
+            "/screener penny — Penny Stocks &lt;$5\n"
+            "/screener micro — unter $1\n"
+            "/screener sub   — Sub-Penny &lt;$0.01\n\n"
+            "<b>Watchlist:</b>\n"
+            "/watchlist — Symbole anzeigen\n"
+            "/add TSLA — Hinzufuegen\n"
+            "/remove TSLA — Entfernen\n"
+        )
+        await update.message.reply_text(text, parse_mode="HTML")
+
+    async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            broker = AlpacaBroker()
+            equity = broker.get_equity()
+            cash = broker.get_cash()
+            bp = broker.get_buying_power()
+            positions = broker.get_positions()
+            market_status = broker.get_market_status()
+
+            status_icon = {"open": "🟢", "extended": "🟡", "closed": "🔴"}.get(market_status, "🔴")
+            status_label = {"open": "Open", "extended": "Extended Hours", "closed": "Closed"}.get(market_status, "Closed")
+            mode = "PAPER" if Config.is_paper() else "LIVE"
+            bot_status = "PAUSED" if self.is_paused else "RUNNING" if self.is_running else "IDLE"
+
+            text = (
+                f"<b>ACCOUNT STATUS</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Mode:     <code>{mode}</code>\n"
+                f"Market:   {status_icon} {status_label}\n"
+                f"Bot:      <code>{bot_status}</code>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Equity:       <b>${equity:,.2f}</b>\n"
+                f"Cash:         ${cash:,.2f}\n"
+                f"Buying Power: ${bp:,.2f}\n"
+                f"Positions:    {len(positions)}\n"
+            )
+            await update.message.reply_text(text, parse_mode="HTML")
+        except Exception as e:
+            await update.message.reply_text(f"Error: {e}")
+
+    async def cmd_positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            broker = AlpacaBroker()
+            positions = broker.get_positions()
+
+            if not positions:
+                await update.message.reply_text("Keine offenen Positionen.")
+                return
+
+            text = "<b>POSITIONEN</b>\n━━━━━━━━━━━━━━━━━━━━━━\n"
+            total_pl = 0.0
+
+            for sym, pos in positions.items():
+                pl = pos["unrealized_pl"]
+                plpc = pos["unrealized_plpc"]
+                total_pl += pl
+                icon = "📈" if pl >= 0 else "📉"
+                pre = "+" if pl >= 0 else ""
+
+                text += (
+                    f"\n{icon} <b>{sym}</b>\n"
+                    f"   {pos['qty']:.0f} shares @ ${pos['avg_entry']:.2f}\n"
+                    f"   P/L: <code>{pre}${pl:.2f} ({pre}{plpc:.1%})</code>\n"
+                )
+
+            pre = "+" if total_pl >= 0 else ""
+            text += f"\n━━━━━━━━━━━━━━━━━━━━━━\nTotal P/L: <b>{pre}${total_pl:.2f}</b>"
+            await update.message.reply_text(text, parse_mode="HTML")
+        except Exception as e:
+            await update.message.reply_text(f"Error: {e}")
+
+    async def cmd_scan(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.message.reply_text("Scanning...")
+
+        try:
+            engine = Engine()
+
+            for symbol in Config.WATCHLIST:
+                signal = engine.analyze_symbol(symbol)
+                text = self._format_signal(signal)
+                await update.message.reply_text(text, parse_mode="HTML")
+
+                if signal.all_passed:
+                    await update.message.reply_text(
+                        f"🚨 <b>SIGNAL: BUY {signal.qty}x {signal.symbol}</b>\n"
+                        f"Soll ich ausfuehren? (Bot fuehrt nur im Auto-Modus aus)",
+                        parse_mode="HTML",
+                    )
+
+            await update.message.reply_text("Scan complete.")
+        except Exception as e:
+            await update.message.reply_text(f"Scan error: {e}")
+
+    async def cmd_trades(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.engine or not self.engine.trade_log:
+            await update.message.reply_text("Keine Trades heute.")
+            return
+
+        text = "<b>HEUTIGE TRADES</b>\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        for t in self.engine.trade_log[-10:]:
+            text += (
+                f"\n{t.timestamp.strftime('%H:%M')} "
+                f"<b>{t.action} {t.qty}x {t.symbol}</b>\n"
+                f"   {t.reason}\n"
+            )
+        await update.message.reply_text(text, parse_mode="HTML")
+
+    async def cmd_watchlist(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        symbols = ", ".join(Config.WATCHLIST)
+        text = (
+            f"<b>WATCHLIST</b> ({len(Config.WATCHLIST)} Symbole)\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"<code>{symbols}</code>\n\n"
+            f"/add SYMBOL — Hinzufuegen\n"
+            f"/remove SYMBOL — Entfernen"
+        )
+        await update.message.reply_text(text, parse_mode="HTML")
+
+    async def cmd_add(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not context.args:
+            await update.message.reply_text("Usage: /add TSLA")
+            return
+        symbol = context.args[0].upper()
+        if symbol in Config.WATCHLIST:
+            await update.message.reply_text(f"{symbol} ist schon in der Watchlist.")
+            return
+        Config.WATCHLIST.append(symbol)
+        await update.message.reply_text(f"✅ {symbol} hinzugefuegt. Watchlist: {', '.join(Config.WATCHLIST)}")
+
+    async def cmd_remove(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not context.args:
+            await update.message.reply_text("Usage: /remove TSLA")
+            return
+        symbol = context.args[0].upper()
+        if symbol not in Config.WATCHLIST:
+            await update.message.reply_text(f"{symbol} nicht in Watchlist.")
+            return
+        Config.WATCHLIST.remove(symbol)
+        await update.message.reply_text(f"🗑 {symbol} entfernt. Watchlist: {', '.join(Config.WATCHLIST)}")
+
+    async def cmd_pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        self.is_paused = True
+        await update.message.reply_text("⏸ Bot pausiert. /resume zum Fortsetzen.")
+
+    async def cmd_resume(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        self.is_paused = False
+        await update.message.reply_text("▶️ Bot laeuft weiter.")
+
+    async def cmd_run(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if self.is_running:
+            await update.message.reply_text("Bot laeuft bereits.")
+            return
+
+        self.is_running = True
+        self.is_paused = False
+        if self.engine is None:
+            self.engine = Engine()
+        self.engine.notify = self.send_sync   # Telegram-Callback direkt in Engine
+        self.scan_thread = threading.Thread(target=self._scan_loop, daemon=True)
+        self.scan_thread.start()
+
+        await update.message.reply_text(
+            f"🟢 <b>Auto-Scan gestartet</b>\n"
+            f"Intervall: {Config.SCAN_INTERVAL}s\n"
+            f"Watchlist: {', '.join(Config.WATCHLIST)}\n\n"
+            f"/pause — Pausieren\n"
+            f"/stop — Stoppen",
+            parse_mode="HTML",
+        )
+
+    async def cmd_stop(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        self.is_running = False
+        self.is_paused = False
+        await update.message.reply_text("🔴 Auto-Scan gestoppt.")
+
+    async def cmd_regime(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Zeigt aktuelles Markt-Regime und Risk-Parameter."""
+        try:
+            broker = AlpacaBroker()
+            # Regime auf Basis von SPY (S&P 500 ETF) erkennen
+            bars = broker.get_bars("SPY", timeframe="5Min", limit=50)
+            risk = RiskManager()
+            risk.update_regime(bars)
+            p = risk.params
+
+            regime_icons = {
+                "CALM": "😎", "NORMAL": "📊",
+                "VOLATILE": "⚡", "CRISIS": "🚨",
+            }
+            icon = regime_icons.get(risk.regime.value, "📊")
+
+            atr = compute_atr(bars)
+            spy_price = bars["close"].iloc[-1] if not bars.empty else 0
+
+            text = (
+                f"{icon} <b>MARKT-REGIME: {risk.regime.value}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"{p['description']}\n\n"
+                f"<b>Risk-Parameter:</b>\n"
+                f"  Stop-Loss:    {p['stop_loss_atr_mult']}x ATR\n"
+                f"  Take-Profit:  {p['take_profit_atr_mult']}x ATR\n"
+                f"  Trailing:     {p['trailing_stop_atr_mult']}x ATR\n"
+                f"  Max Position: {p['max_position_pct']:.0%}\n"
+                f"  Kelly Mult:   {p['kelly_mult']}\n"
+                f"  Max Positionen: {p['max_open_positions']}\n\n"
+                f"<b>SPY:</b> ${spy_price:.2f} | ATR: ${atr:.2f}\n"
+                f"Kill-Switch: {'🔴 ACTIVE' if risk.kill_switch_active else '🟢 OFF'}"
+            )
+            await update.message.reply_text(text, parse_mode="HTML")
+        except Exception as e:
+            await update.message.reply_text(f"Error: {e}")
+
+    async def cmd_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Performance-Statistiken vom adaptiven Lernsystem."""
+        try:
+            from adaptive import AdaptiveLearner
+            learner = AdaptiveLearner()
+            stats = learner.get_stats()
+
+            if stats.get("total_trades", 0) == 0:
+                await update.message.reply_text("Noch keine abgeschlossenen Trades.")
+                return
+
+            text = (
+                f"📊 <b>PERFORMANCE STATS</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Trades:    <b>{stats['total_trades']}</b>\n"
+                f"Wins:      {stats['wins']} ({stats['win_rate']:.0%})\n"
+                f"Losses:    {stats['losses']}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Avg Win:   <code>{stats['avg_win']:+.2%}</code>\n"
+                f"Avg Loss:  <code>{stats['avg_loss']:+.2%}</code>\n"
+                f"Best:      <code>{stats['best_trade']:+.2%}</code>\n"
+                f"Worst:     <code>{stats['worst_trade']:+.2%}</code>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Total P/L: <b>${stats['total_pnl']:+,.2f}</b>\n"
+                f"Sharpe:    {stats['sharpe']}\n"
+            )
+
+            # Per-Regime
+            if stats.get("per_regime"):
+                text += "\n<b>Per Regime:</b>\n"
+                for regime, rs in stats["per_regime"].items():
+                    text += (
+                        f"  {regime}: {rs['trades']} trades, "
+                        f"WR {rs['win_rate']:.0%}, "
+                        f"avg {rs['avg_pnl']:+.2%}\n"
+                    )
+
+            await update.message.reply_text(text, parse_mode="HTML")
+        except Exception as e:
+            await update.message.reply_text(f"Error: {e}")
+
+    async def cmd_weights(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Zeigt gelernte Formel-Gewichte pro Regime."""
+        try:
+            from adaptive import AdaptiveLearner
+            learner = AdaptiveLearner()
+            summary = learner.get_weights_summary()
+
+            text = f"🧠 <b>GELERNTE GEWICHTE</b>\n<pre>{summary}</pre>"
+            await update.message.reply_text(text, parse_mode="HTML")
+        except Exception as e:
+            await update.message.reply_text(f"Error: {e}")
+
+    async def cmd_screener(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Screener: Top-Mover nach Kategorie (penny/micro/sub)."""
+        await update.message.reply_text("🔍 Screener läuft...")
+
+        mode = context.args[0].lower() if context.args else "all"
+
+        mode_config = {
+            "penny": {"label": "Penny Stocks (<$5)", "max_price": 5.0},
+            "micro": {"label": "Micro Stocks (<$1)", "max_price": 1.0},
+            "sub":   {"label": "Sub-Penny (<$0.01)", "max_price": 0.01},
+            "all":   {"label": "Top-Mover (alle)", "max_price": None},
+        }
+        cfg = mode_config.get(mode, mode_config["all"])
+
+        price_filter = (
+            f"Nur Aktien mit Kurs unter ${cfg['max_price']} USD."
+            if cfg["max_price"]
+            else "Alle Preisbereiche erlaubt."
+        )
+
+        prompt = f"""Du bist ein Day-Trader-Screener. {price_filter}
+Welche 10 US-Aktien haben HEUTE das höchste Momentum und relatives Volumen (mind. 3x Durchschnitt)?
+Fokus auf: starke News-Katalysatoren, Short Squeeze, FDA, Earnings heute.
+Antworte NUR mit JSON:
+{{"results": [{{"symbol": "SYM", "price_est": 1.23, "catalyst": "kurzer Grund", "volume_mult": 4.5}}]}}"""
+
+        try:
+            import json
+            from google import genai
+            from google.genai import types as genai_types
+
+            client = genai.Client(api_key=Config.GEMINI_API_KEY)
+            response = client.models.generate_content(
+                model=Config.REASONING_MODEL,
+                contents=prompt,
+                config=genai_types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.3,
+                    max_output_tokens=500,
+                    thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
+                ),
+            )
+            text = response.text or ""
+            result = None
+            depth, start = 0, None
+            for i, c in enumerate(text):
+                if c == '{':
+                    if depth == 0:
+                        start = i
+                    depth += 1
+                elif c == '}':
+                    depth -= 1
+                    if depth == 0 and start is not None:
+                        try:
+                            result = json.loads(text[start:i + 1])
+                        except json.JSONDecodeError:
+                            pass
+                        break
+
+            if not result or not result.get("results"):
+                await update.message.reply_text("Keine Ergebnisse vom Screener.")
+                return
+
+            lines = [f"📊 <b>SCREENER — {cfg['label']}</b>", "━━━━━━━━━━━━━━━━━━━━━━"]
+            for r in result["results"][:10]:
+                sym = r.get("symbol", "?").upper()
+                price = r.get("price_est", 0)
+                catalyst = r.get("catalyst", "—")[:40]
+                vol = r.get("volume_mult", 0)
+                lines.append(
+                    f"\n<b>{sym}</b>  ~${price:.2f}  |  {vol:.1f}x Vol\n"
+                    f"  📌 {catalyst}"
+                )
+            lines.append(f"\n<i>Quelle: Gemini Echtzeit-Analyse</i>")
+            lines.append(f"/screener penny  /screener micro  /screener sub")
+
+            await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+        except Exception as e:
+            await update.message.reply_text(f"Screener Error: {e}")
+
+    async def cmd_sentiment(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Sentiment-Analyse fuer ein Symbol oder die ganze Watchlist."""
+        try:
+            from formulas.sentiment import SentimentEngine
+            broker = AlpacaBroker()
+            se = SentimentEngine(broker)
+
+            symbols = [context.args[0].upper()] if context.args else Config.WATCHLIST[:5]
+
+            for symbol in symbols:
+                result = se.analyze_symbol(symbol)
+                score = result["score"]
+
+                if score > 0.3:
+                    icon = "🟢"
+                elif score > 0:
+                    icon = "🔵"
+                elif score > -0.3:
+                    icon = "🟡"
+                else:
+                    icon = "🔴"
+
+                text = (
+                    f"{icon} <b>{symbol}</b> Sentiment: <code>{score:+.3f}</code>\n"
+                    f"  Confidence: {result['confidence']:.0%}\n"
+                    f"  News: {result['article_count']} Artikel\n"
+                    f"  Symbol: {result['symbol_sentiment']['score']:+.3f} | "
+                    f"Makro: {result['macro_sentiment']['score']:+.3f}\n"
+                )
+
+                # Top Signals
+                details = result["symbol_sentiment"].get("details", [])
+                if details:
+                    text += "  Signale:\n"
+                    for d in details[:3]:
+                        text += f"    {d['score']:+.2f} {d['headline'][:50]}...\n"
+
+                await update.message.reply_text(text, parse_mode="HTML")
+
+        except Exception as e:
+            await update.message.reply_text(f"Error: {e}")
+
+    # ── Auto-Scan Loop (runs in thread) ─────────────────
+
+    def _scan_loop(self):
+        logger.info("Auto-scan thread started")
+        self.send_sync("🤖 Auto-Scan gestartet. SpikeSensor aktiv (300+ Symbole).")
+
+        while self.is_running:
+            if self.is_paused:
+                time.sleep(5)
+                continue
+
+            try:
+                broker = self.engine.broker
+                market_status = broker.get_market_status()
+                status_labels = {"open": "REGULÄR", "extended": "VOR-/NACHBÖRSE", "closed": "NUR CRYPTO"}
+                logger.info(f"Scan [{status_labels.get(market_status, market_status)}]")
+
+                # Spike-Alert BEFORE scan so Telegram gets notified immediately
+                if market_status in ("open", "extended"):
+                    spike_symbols = self.engine.spike_sensor.scan()
+                    if spike_symbols:
+                        self.send_sync(
+                            f"⚡ <b>SPIKE DETECTED</b> — {len(spike_symbols)} Symbole\n"
+                            + "\n".join(f"  • <b>{s}</b>" for s in spike_symbols[:10])
+                            + "\n<i>Vollanalyse läuft...</i>"
+                        )
+                        # Spike-Symbole sofort in die Engine-Watchlist einbauen
+                        for s in spike_symbols:
+                            if s not in self.engine.watchlist.dynamic_symbols:
+                                self.engine.watchlist.dynamic_symbols.append(s)
+
+                # Haupt-Scan (Watchlist + Spike-Symbole + Execute)
+                # scan_once übernimmt: exit_checks, watchlist, spike-merge, execute
+                spike_results = self.engine.scan_once(market_status)
+
+                # Stop-Loss Nähe Warnung
+                positions = broker.get_positions()
+                for sym, pos in positions.items():
+                    plpc = pos["unrealized_plpc"]
+                    if plpc < -0.025:
+                        self.send_sync(f"⚠️ <b>{sym}</b> bei {plpc:+.1%} — nahe Stop Loss (-3%)")
+
+            except Exception as e:
+                logger.error(f"Scan loop error: {e}")
+                self.send_sync(f"⚠️ Scan error: {e}")
+
+            # Intervall je nach Marktphase
+            ms = self.engine.broker.get_market_status()
+            interval = Config.SCAN_INTERVAL if ms == "open" else (60 if ms == "extended" else 120)
+            time.sleep(interval)
+
+        self.send_sync("🔴 Auto-Scan gestoppt.")
+        logger.info("Auto-scan thread ended")
+
+    # ── Helpers ──────────────────────────────────────────
+
+    def _format_signal(self, signal: TradeSignal) -> str:
+        icon = "🟢" if signal.all_passed else "⚪"
+        lines = [
+            f"{icon} <b>{signal.symbol}</b>  {signal.timestamp.strftime('%H:%M:%S')}",
+            "━━━━━━━━━━━━━━━━━━━━━━",
+        ]
+        for name, r in signal.results.items():
+            s = "✅" if r["passed"] else "❌"
+            lines.append(f"{s} {name:<14} {r['signal']:+.4f}")
+
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append(f"Action: <b>{signal.action}</b>")
+        if signal.all_passed:
+            lines.append(f"Qty: <b>{signal.qty}</b>")
+        return "\n".join(lines)
+
+    def _format_signal_text(self, signal: TradeSignal) -> str:
+        lines = []
+        for name, r in signal.results.items():
+            s = "✅" if r["passed"] else "❌"
+            lines.append(f"{s} {name}: {r['signal']:+.4f}")
+        return "\n".join(lines)
+
+    # ── Start ───────────────────────────────────────────
+
+    def run(self):
+        """Startet den Telegram Bot."""
+        logger.info("Starting Telegram bot...")
+
+        self.app = Application.builder().token(self.token).build()
+        self._bot = self.app.bot
+
+        # Commands registrieren
+        self.app.add_handler(CommandHandler("start", self.cmd_start))
+        self.app.add_handler(CommandHandler("status", self.cmd_status))
+        self.app.add_handler(CommandHandler("scan", self.cmd_scan))
+        self.app.add_handler(CommandHandler("positions", self.cmd_positions))
+        self.app.add_handler(CommandHandler("trades", self.cmd_trades))
+        self.app.add_handler(CommandHandler("watchlist", self.cmd_watchlist))
+        self.app.add_handler(CommandHandler("add", self.cmd_add))
+        self.app.add_handler(CommandHandler("remove", self.cmd_remove))
+        self.app.add_handler(CommandHandler("pause", self.cmd_pause))
+        self.app.add_handler(CommandHandler("resume", self.cmd_resume))
+        self.app.add_handler(CommandHandler("run", self.cmd_run))
+        self.app.add_handler(CommandHandler("stop", self.cmd_stop))
+        self.app.add_handler(CommandHandler("regime", self.cmd_regime))
+        self.app.add_handler(CommandHandler("stats", self.cmd_stats))
+        self.app.add_handler(CommandHandler("weights", self.cmd_weights))
+        self.app.add_handler(CommandHandler("sentiment", self.cmd_sentiment))
+        self.app.add_handler(CommandHandler("screener", self.cmd_screener))
+
+        logger.info("Telegram bot running. Send /start to begin.")
+        self.app.run_polling(drop_pending_updates=True)
+
+
+================================================================================
+DATEI: risk_manager.py
+================================================================================
+
+"""
+risk_manager.py — Adaptives Risikomanagement
+
+Ersetzt die fixen Stop-Loss (-3%) / Take-Profit (+5%) durch
+dynamische Levels basierend auf:
+
+1. Markt-Regime-Erkennung (Normal / Volatil / Crash)
+2. ATR-basierte Stops (Average True Range)
+3. Trailing Stop Loss
+4. Max-Drawdown Kill-Switch
+5. Krieg/Krise-Modus (aktuell: Iran-Konflikt)
+
+Aus dem PDF "Der perfekte AI Trading Bot":
+→ "Dynamische Positionsgroessen basierend auf Volatilitaet,
+   automatisierte Stops und Black-Swan-Schutz"
+"""
+
+import logging
+import time
+from datetime import datetime
+from enum import Enum
+from typing import Optional
+
+import numpy as np
+import pandas as pd
+
+from config import Config
+
+logger = logging.getLogger("bot.risk")
+
+
+# ═══════════════════════════════════════════════════════
+#  MARKT-REGIME-ERKENNUNG
+# ═══════════════════════════════════════════════════════
+
+class MarketRegime(Enum):
+    CALM = "CALM"           # VIX < 15, normale Volatilitaet
+    NORMAL = "NORMAL"       # VIX 15-25
+    VOLATILE = "VOLATILE"   # VIX 25-35, erhoehte Vorsicht
+    CRISIS = "CRISIS"       # VIX > 35, Krieg/Crash/Black-Swan
+
+
+def detect_regime(bars: pd.DataFrame, vix_level: Optional[float] = None) -> MarketRegime:
+    """
+    Erkennt das aktuelle Markt-Regime.
+
+    Nutzt:
+    - Realisierte Volatilitaet (aus Bars)
+    - VIX-Level (wenn verfuegbar)
+    - Drawdown vom lokalen Hoch
+    """
+    if len(bars) < 20:
+        return MarketRegime.NORMAL
+
+    returns = bars["returns"].dropna()
+
+    # ── Realisierte Volatilitaet (annualisiert) ──
+    realized_vol = returns.tail(20).std() * np.sqrt(252)
+
+    # ── Drawdown vom 20-Bar-Hoch ──
+    recent_high = bars["close"].tail(20).max()
+    current = bars["close"].iloc[-1]
+    drawdown = (current - recent_high) / recent_high
+
+    # ── VIX-basierte Einschaetzung ──
+    if vix_level is not None:
+        if vix_level > 35:
+            return MarketRegime.CRISIS
+        elif vix_level > 25:
+            return MarketRegime.VOLATILE
+        elif vix_level > 15:
+            return MarketRegime.NORMAL
+        else:
+            return MarketRegime.CALM
+
+    # ── Fallback: Realisierte Volatilitaet ──
+    if realized_vol > 0.50 or drawdown < -0.08:
+        return MarketRegime.CRISIS
+    elif realized_vol > 0.30 or drawdown < -0.05:
+        return MarketRegime.VOLATILE
+    elif realized_vol > 0.15:
+        return MarketRegime.NORMAL
+    else:
+        return MarketRegime.CALM
+
+
+# ═══════════════════════════════════════════════════════
+#  ATR (AVERAGE TRUE RANGE)
+# ═══════════════════════════════════════════════════════
+
+def compute_atr(bars: pd.DataFrame, period: int = 14) -> float:
+    """Berechnet ATR — misst die durchschnittliche Schwankungsbreite."""
+    if len(bars) < period + 1:
+        return 0.0
+
+    high = bars["high"]
+    low = bars["low"]
+    close = bars["close"].shift(1)
+
+    tr1 = high - low
+    tr2 = (high - close).abs()
+    tr3 = (low - close).abs()
+
+    true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = true_range.rolling(period).mean().iloc[-1]
+
+    return float(atr)
+
+
+# ═══════════════════════════════════════════════════════
+#  REGIME-ADAPTIVE PARAMETER
+# ═══════════════════════════════════════════════════════
+
+# Jedes Regime hat andere Risk-Parameter
+REGIME_PARAMS = {
+    MarketRegime.CALM: {
+        "stop_loss_atr_mult": 2.0,       # Enger Stop
+        "take_profit_atr_mult": 4.0,     # 2:1 R/R
+        "trailing_stop_atr_mult": 1.5,
+        "max_position_pct": 0.12,        # Etwas groessere Positionen ok
+        "kelly_mult": 0.30,              # 30% Kelly
+        "max_open_positions": 5,
+        "description": "Ruhiger Markt — normale Parameter",
+    },
+    MarketRegime.NORMAL: {
+        "stop_loss_atr_mult": 2.5,
+        "take_profit_atr_mult": 5.0,     # 2:1 R/R
+        "trailing_stop_atr_mult": 2.0,
+        "max_position_pct": 0.10,
+        "kelly_mult": 0.25,              # Quarter Kelly
+        "max_open_positions": 4,
+        "description": "Normaler Markt — Standard-Parameter",
+    },
+    MarketRegime.VOLATILE: {
+        "stop_loss_atr_mult": 3.0,       # Weiterer Stop (mehr Noise)
+        "take_profit_atr_mult": 7.5,     # 2.5:1 R/R — groessere Moves moeglich
+        "trailing_stop_atr_mult": 2.5,
+        "max_position_pct": 0.06,        # Kleinere Positionen
+        "kelly_mult": 0.15,              # 15% Kelly
+        "max_open_positions": 3,
+        "description": "Volatile Phase — kleinere Positionen, weitere Stops",
+    },
+    MarketRegime.CRISIS: {
+        "stop_loss_atr_mult": 4.0,       # Sehr weit (extreme Swings)
+        "take_profit_atr_mult": 12.0,    # GROSSE Moves — nicht zu frueh raus!
+        "trailing_stop_atr_mult": 3.5,
+        "max_position_pct": 0.03,        # Winzige Positionen
+        "kelly_mult": 0.10,              # 10% Kelly
+        "max_open_positions": 2,
+        "description": "KRISEN-MODUS — minimale Positionen, maximale R/R",
+    },
+}
+
+
+# ═══════════════════════════════════════════════════════
+#  RISK MANAGER
+# ═══════════════════════════════════════════════════════
+
+class RiskManager:
+    """Zentrales Risikomanagement mit adaptiven Parametern."""
+
+    def __init__(self):
+        self.regime = MarketRegime.NORMAL
+        self.params = REGIME_PARAMS[self.regime]
+        self.peak_equity = 0.0
+        self.max_drawdown_limit = 0.15   # 15% Max-Drawdown → Kill Switch
+        self.daily_loss_limit = 0.05     # 5% Tagesverlust → Stop
+        self.start_of_day_equity = 0.0
+        self.kill_switch_active = False
+        self._regime_last_update: float = 0
+        self._regime_cache_ttl: int = 300  # Regime max alle 5 Minuten updaten
+
+    # ── Regime Update ──────────────────────────────────
+
+    def update_regime(self, bars: pd.DataFrame, vix_level: Optional[float] = None, force: bool = False):
+        """Aktualisiert das Markt-Regime — max alle 5 Minuten (global, nicht per Symbol)."""
+        now = time.time()
+        if not force and (now - self._regime_last_update) < self._regime_cache_ttl:
+            return  # Noch frisch — kein Update
+        self._regime_last_update = now
+
+        old = self.regime
+        self.regime = detect_regime(bars, vix_level)
+        self.params = REGIME_PARAMS[self.regime]
+
+        if old != self.regime:
+            logger.warning(
+                f"REGIME CHANGE: {old.value} → {self.regime.value} "
+                f"({self.params['description']})"
+            )
+
+    # ── Stop-Loss / Take-Profit berechnen ──────────────
+
+    def compute_stops(self, entry_price: float, atr: float) -> dict:
+        """
+        Berechnet ATR-basierte Stop-Loss und Take-Profit Levels.
+
+        In einer Krise (Iran-Krieg etc.) sind die Moves GROESSER,
+        also brauchen wir:
+        - Weitere Stops (damit man nicht durch Noise ausgestoppt wird)
+        - Hoehere Take-Profits (um die grossen Moves mitzunehmen)
+        """
+        if atr <= 0:
+            atr = entry_price * 0.01  # Fallback: 1%
+
+        sl_distance = atr * self.params["stop_loss_atr_mult"]
+        tp_distance = atr * self.params["take_profit_atr_mult"]
+        trailing_distance = atr * self.params["trailing_stop_atr_mult"]
+
+        stop_loss = entry_price - sl_distance
+        take_profit = entry_price + tp_distance
+        trailing_stop = entry_price - trailing_distance
+
+        return {
+            "stop_loss": round(stop_loss, 2),
+            "take_profit": round(take_profit, 2),
+            "trailing_stop": round(trailing_stop, 2),
+            "stop_loss_pct": f"{-sl_distance/entry_price:.1%}",
+            "take_profit_pct": f"{+tp_distance/entry_price:.1%}",
+            "risk_reward": round(tp_distance / sl_distance, 1),
+            "atr": round(atr, 4),
+            "regime": self.regime.value,
+        }
+
+    def update_trailing_stop(
+        self, current_price: float, highest_since_entry: float, atr: float
+    ) -> float:
+        """Trailing Stop: Zieht mit wenn der Preis steigt."""
+        trailing_dist = atr * self.params["trailing_stop_atr_mult"]
+        return round(highest_since_entry - trailing_dist, 2)
+
+    # ── Position Sizing ────────────────────────────────
+
+    def max_position_size(self, equity: float, price: float) -> int:
+        """Maximale Positionsgroesse basierend auf Regime."""
+        max_usd = equity * self.params["max_position_pct"]
+        if price <= 0:
+            return 0
+        return max(1, int(max_usd / price))
+
+    def adjust_kelly(self, kelly_fraction: float) -> float:
+        """Passt Kelly an das Regime an."""
+        return kelly_fraction * (self.params["kelly_mult"] / 0.25)
+
+    # ── Kill-Switch ────────────────────────────────────
+
+    def check_kill_switch(self, current_equity: float) -> bool:
+        """
+        Black-Swan-Schutz:
+        - Stoppt ALLE Trades wenn Drawdown > 15%
+        - Stoppt ALLE Trades wenn Tagesverlust > 5%
+
+        Aus dem PDF: "automatisierte Stops und Black-Swan-Schutz"
+        """
+        # Peak Equity tracken
+        if current_equity > self.peak_equity:
+            self.peak_equity = current_equity
+
+        # Tagesstart setzen
+        if self.start_of_day_equity == 0:
+            self.start_of_day_equity = current_equity
+
+        # ── Max Drawdown Check ──
+        if self.peak_equity > 0:
+            drawdown = (current_equity - self.peak_equity) / self.peak_equity
+            if drawdown < -self.max_drawdown_limit:
+                logger.critical(
+                    f"KILL SWITCH: Max Drawdown {drawdown:.1%} "
+                    f"(Limit: {-self.max_drawdown_limit:.0%})"
+                )
+                self.kill_switch_active = True
+                return True
+
+        # ── Daily Loss Check ──
+        if self.start_of_day_equity > 0:
+            daily_change = (current_equity - self.start_of_day_equity) / self.start_of_day_equity
+            if daily_change < -self.daily_loss_limit:
+                logger.critical(
+                    f"KILL SWITCH: Daily loss {daily_change:.1%} "
+                    f"(Limit: {-self.daily_loss_limit:.0%})"
+                )
+                self.kill_switch_active = True
+                return True
+
+        return False
+
+    def can_open_position(self, current_positions: int) -> bool:
+        """Prueft ob wir noch neue Positionen oeffnen duerfen."""
+        if self.kill_switch_active:
+            return False
+        return current_positions < self.params["max_open_positions"]
+
+    def reset_daily(self, equity: float):
+        """Taeglicher Reset (am Marktstart aufrufen)."""
+        self.start_of_day_equity = equity
+        self.kill_switch_active = False
+
+    # ── Exit-Entscheidung ──────────────────────────────
+
+    def should_exit(
+        self,
+        entry_price: float,
+        current_price: float,
+        highest_price: float,
+        atr: float,
+        bayesian_posterior: float = 0.5,
+    ) -> dict:
+        """
+        Entscheidet ob eine Position geschlossen werden soll.
+
+        Checks:
+        1. Fixer Stop-Loss (ATR-basiert)
+        2. Trailing Stop
+        3. Take-Profit (ATR-basiert, ADAPTIV je Regime!)
+        4. Bayesian Exit (Sentiment dreht)
+        """
+        stops = self.compute_stops(entry_price, atr)
+        trailing = self.update_trailing_stop(current_price, highest_price, atr)
+
+        result = {
+            "should_exit": False,
+            "reason": "HOLD",
+            "stops": stops,
+            "trailing_stop": trailing,
+        }
+
+        # 1. Stop-Loss
+        if current_price <= stops["stop_loss"]:
+            result["should_exit"] = True
+            result["reason"] = f"STOP LOSS @ ${stops['stop_loss']}"
+            return result
+
+        # 2. Trailing Stop (nur wenn im Gewinn)
+        if current_price > entry_price and current_price <= trailing:
+            result["should_exit"] = True
+            result["reason"] = f"TRAILING STOP @ ${trailing}"
+            return result
+
+        # 3. Take-Profit
+        if current_price >= stops["take_profit"]:
+            result["should_exit"] = True
+            result["reason"] = f"TAKE PROFIT @ ${stops['take_profit']} ({stops['take_profit_pct']})"
+            return result
+
+        # 4. Bayesian Exit (Signal dreht stark bearish)
+        if bayesian_posterior < 0.30:
+            result["should_exit"] = True
+            result["reason"] = f"BAYESIAN EXIT (posterior={bayesian_posterior:.2f})"
+            return result
+
+        return result
+
+    # ── Summary ────────────────────────────────────────
+
+    def status_summary(self) -> str:
+        p = self.params
+        return (
+            f"Regime: {self.regime.value}\n"
+            f"Max Position: {p['max_position_pct']:.0%}\n"
+            f"Kelly Mult: {p['kelly_mult']}\n"
+            f"SL: {p['stop_loss_atr_mult']}x ATR | "
+            f"TP: {p['take_profit_atr_mult']}x ATR\n"
+            f"Max Positions: {p['max_open_positions']}\n"
+            f"Kill Switch: {'ACTIVE' if self.kill_switch_active else 'OFF'}"
+        )
+
+
+================================================================================
+DATEI: engine.py
+================================================================================
+
 """
 engine.py — Drei-Schichten-Architektur:
   Schicht 1 (Perception):  7 quantitative Formeln scannen den Markt
@@ -57,7 +1213,6 @@ class ReasoningLayer:
         self.model = Config.REASONING_MODEL
         self.min_confidence = Config.REASONING_MIN_CONFIDENCE
         self.market_ctx = MarketContext()
-        self._learner: Optional["AdaptiveLearner"] = None  # wird von Engine gesetzt
         logger.info(f"ReasoningLayer initialisiert: {self.model} (min_confidence={self.min_confidence})")
 
     def _cascade_fallback(self, symbol: str, cascade_level: int, reason: str) -> dict:
@@ -123,15 +1278,6 @@ class ReasoningLayer:
         market_context_str = self.market_ctx.format_for_prompt(symbol)
         cascade_info = f"{signal.cascade_label}" if signal.cascade_level else "unbekannt"
 
-        # ── Learning Summary aus Autopsy-Analyse injizieren ──
-        learning_summary = ""
-        if self._learner is not None:
-            learning_summary = self._learner.get_learning_summary()
-        learning_section = (
-            f"\nSYSTEM-LERNMUSTER (aus vergangenen Trades automatisch erkannt):\n{learning_summary}\n"
-            if learning_summary else ""
-        )
-
         prompt = f"""Du bist ein erfahrener quantitativer Trader. Analysiere dieses Trading-Signal und triff eine finale Kaufentscheidung.
 
 SYMBOL: {symbol}
@@ -152,7 +1298,7 @@ SENTIMENT-ANALYSE:
 
 ECHTZEIT MARKT-KONTEXT:
 {market_context_str}
-{learning_section}
+
 POSITION:
   - Groesse: ~{signal.qty} Aktien (~${signal.qty * price:,.0f})
   - Risiko: {(signal.qty * price / equity * 100):.1f}% des Depots
@@ -160,97 +1306,78 @@ POSITION:
 Deine Aufgabe: Gib eine Gewinnwahrscheinlichkeit in % (0-100) und entscheide BUY oder HOLD.
 Bei 7/7 Filtern: hohe Wahrscheinlichkeit erwartet. Bei 4/7: konservativ sein.
 Beruecksichtige: Kaskaden-Level, VIX, Sektor-Trend, Sentiment, Positionsgroesse.
-Wenn die System-Lernmuster aehnliche Muster als problematisch markieren, sei konservativer.
 
 Antworte NUR mit JSON:
 {{"decision": "BUY" oder "HOLD", "probability_pct": 0-100, "confidence": 0.0-1.0, "reason": "ein Satz auf Deutsch", "risk_factors": ["Faktor1", "Faktor2"]}}"""
 
-        def _gemini_call(prompt_text: str) -> dict:
-            """Einzelner Gemini-API-Call mit Schema. Wirft Exception bei Fehler."""
-            from google.genai import types as genai_types
-
-            response_schema = genai_types.Schema(
-                type=genai_types.Type.OBJECT,
-                properties={
-                    "decision":        genai_types.Schema(type=genai_types.Type.STRING, enum=["BUY", "HOLD"]),
-                    "probability_pct": genai_types.Schema(type=genai_types.Type.INTEGER),
-                    "confidence":      genai_types.Schema(type=genai_types.Type.NUMBER),
-                    "reason":          genai_types.Schema(type=genai_types.Type.STRING),
-                    "risk_factors":    genai_types.Schema(
-                        type=genai_types.Type.ARRAY,
-                        items=genai_types.Schema(type=genai_types.Type.STRING),
-                    ),
-                },
-                required=["decision", "probability_pct", "confidence", "reason", "risk_factors"],
-            )
-
-            response = self.client.models.generate_content(
-                model=self.model,
-                contents=prompt_text,
-                config=genai_types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=response_schema,
-                    temperature=0.1,
-                    max_output_tokens=800,
-                    thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
-                ),
-            )
-
-            raw_text = response.text or ""
-            result = json.loads(raw_text)  # Wirft bei truncated JSON eine Exception
-
-            approved = (
-                result.get("decision", "HOLD") == "BUY"
-                and float(result.get("confidence", 0)) >= self.min_confidence
-            )
-            prob_pct = int(result.get("probability_pct", round(float(result.get("confidence", 0)) * 100)))
-            logger.info(
-                f"[REASONING] {symbol}: {result.get('decision')} "
-                f"Wahrscheinlichkeit={prob_pct}% | {result.get('reason', '')}"
-            )
-            return {
-                "approved": approved,
-                "confidence": float(result.get("confidence", 0)),
-                "probability_pct": prob_pct,
-                "reason": result.get("reason", ""),
-                "risk_factors": result.get("risk_factors", []),
-                "raw": result,
-                "prompt": prompt_text,
-                "raw_response": raw_text,
-            }
-
         def _do_call() -> dict:
-            # ── Versuch 1: Vollständiger Prompt ──
             try:
-                return _gemini_call(prompt)
+                from google.genai import types as genai_types
+
+                # ── Structured Output Schema — kein JSON-Parsing nötig ──
+                response_schema = genai_types.Schema(
+                    type=genai_types.Type.OBJECT,
+                    properties={
+                        "decision":        genai_types.Schema(type=genai_types.Type.STRING, enum=["BUY", "HOLD"]),
+                        "probability_pct": genai_types.Schema(type=genai_types.Type.INTEGER),
+                        "confidence":      genai_types.Schema(type=genai_types.Type.NUMBER),
+                        "reason":          genai_types.Schema(type=genai_types.Type.STRING),
+                        "risk_factors":    genai_types.Schema(
+                            type=genai_types.Type.ARRAY,
+                            items=genai_types.Schema(type=genai_types.Type.STRING),
+                        ),
+                    },
+                    required=["decision", "probability_pct", "confidence", "reason", "risk_factors"],
+                )
+
+                response = self.client.models.generate_content(
+                    model=self.model,
+                    contents=prompt,
+                    config=genai_types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=response_schema,
+                        temperature=0.1,
+                        max_output_tokens=300,
+                        thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
+                    ),
+                )
+
+                raw_text = response.text or ""
+                result = json.loads(raw_text)
+
+                approved = (
+                    result.get("decision", "HOLD") == "BUY"
+                    and float(result.get("confidence", 0)) >= self.min_confidence
+                )
+                prob_pct = int(result.get("probability_pct", round(float(result.get("confidence", 0)) * 100)))
+                logger.info(
+                    f"[REASONING] {symbol}: {result.get('decision')} "
+                    f"Wahrscheinlichkeit={prob_pct}% | {result.get('reason', '')}"
+                )
+                return {
+                    "approved": approved,
+                    "confidence": float(result.get("confidence", 0)),
+                    "probability_pct": prob_pct,
+                    "reason": result.get("reason", ""),
+                    "risk_factors": result.get("risk_factors", []),
+                    "raw": result,
+                    "prompt": prompt,
+                    "raw_response": raw_text,
+                }
+
             except Exception as e:
-                logger.warning(f"[REASONING] {symbol}: Versuch 1 fehlgeschlagen ({e}) — Retry mit kuerzem Prompt")
+                logger.error(f"[REASONING] {symbol}: Gemini Fehler: {e}")
+                return {"approved": False, "confidence": 0.0, "reason": f"API error: {e}",
+                        "risk_factors": [], "raw": {}, "prompt": prompt, "raw_response": str(e)}
 
-            # ── Versuch 2: Kürzerer Prompt ohne Learning-Summary und Marktkontext ──
-            short_prompt = (
-                f"Trading-Signal fuer {symbol} @ ${price:.2f}. Depot: ${equity:,.2f}.\n"
-                f"Regime: {regime} | Kaskade: {signal.cascade_label}\n"
-                f"Filter: {', '.join(f'{n}:PASS' if r['passed'] else f'{n}:FAIL' for n, r in signal.results.items())}\n\n"
-                f"Entscheide: BUY oder HOLD?\n"
-                f"Antworte NUR mit JSON:\n"
-                f'{{"decision":"BUY" oder "HOLD","probability_pct":0-100,"confidence":0.0-1.0,"reason":"ein Satz auf Deutsch","risk_factors":[]}}'
-            )
-            try:
-                result = _gemini_call(short_prompt)
-                result["prompt"] = prompt  # Original-Prompt fuer Autopsy erhalten
-                return result
-            except Exception as e2:
-                logger.error(f"[REASONING] {symbol}: Beide Versuche fehlgeschlagen: {e2}")
-                raise e2
-
-        # ── 15-Sekunden Timeout (2 Versuche a ~6s) ──
+        # ── 5-Sekunden Timeout — blockiert nicht bei hängendem Gemini ──
         from concurrent.futures import TimeoutError as FuturesTimeoutError
         with ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(_do_call)
             try:
-                return future.result(timeout=15)
+                return future.result(timeout=5)
             except FuturesTimeoutError:
-                return self._cascade_fallback(symbol, signal.cascade_level, "Gemini-Timeout (15s)")
+                return self._cascade_fallback(symbol, signal.cascade_level, "Gemini-Timeout (5s)")
             except Exception as e:
                 return self._cascade_fallback(symbol, signal.cascade_level, f"Gemini-Exception: {e}")
 
@@ -319,19 +1446,12 @@ SELL = Sofort verkaufen (Setup hat einen kritischen Fehler / Marktlage hat sich 
                     response_mime_type="application/json",
                     response_schema=response_schema,
                     temperature=0.1,
-                    max_output_tokens=500,
+                    max_output_tokens=200,
                     thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
                 ),
             )
 
-            raw_text = response.text or "{}"
-            try:
-                result = json.loads(raw_text)
-            except json.JSONDecodeError:
-                decision = "SELL" if '"SELL"' in raw_text else "HOLD"
-                logger.warning(f"[HOLD/SELL] {symbol}: JSON truncated, decision extracted: {decision}")
-                result = {"decision": decision, "confidence": 0.5, "reason": "JSON truncated", "risk_factors": []}
-
+            result = json.loads(response.text or "{}")
             should_sell = result.get("decision", "HOLD") == "SELL"
             logger.info(
                 f"[HOLD/SELL] {symbol}: {result.get('decision')} "
@@ -343,7 +1463,7 @@ SELL = Sofort verkaufen (Setup hat einen kritischen Fehler / Marktlage hat sich 
                 "reason": result.get("reason", ""),
                 "risk_factors": result.get("risk_factors", []),
                 "prompt": prompt,
-                "raw_response": raw_text,
+                "raw_response": response.text or "",
             }
 
         except Exception as e:
@@ -367,7 +1487,8 @@ SELL = Sofort verkaufen (Setup hat einen kritischen Fehler / Marktlage hat sich 
         """
         market_context_str = self.market_ctx.format_for_prompt(symbol)
 
-        prompt = f"""Du bist ein erfahrener Trader. Bewerte die folgende offene Position objektiv.
+        prompt = f"""Du bist ein erfahrener Trader. Der Trading-Bot wurde neu gestartet (Absturz oder manueller Neustart).
+Die folgende Position war beim Neustart noch offen und wurde in der Zwischenzeit NICHT ueberwacht.
 
 SYMBOL: {symbol}
 EINSTIEG: ${entry_price:.2f}  |  AKTUELL: ${current_price:.2f}  |  P/L: {pnl_pct:+.2f}%
@@ -377,11 +1498,16 @@ MARKT-REGIME: {regime}
 MARKT-KONTEXT:
 {market_context_str}
 
-Entscheide auf Basis der aktuellen Marktlage und P/L:
-HOLD = Position halten (kein klarer technischer Grund zum Verkauf)
-SELL = Sofort schliessen (Stop Loss unterschritten, Markt klar gedreht, oder P/L kritisch negativ)
+Wichtige Fragen die du beantworten sollst:
+- Ist die aktuelle P/L akzeptabel oder gefaehrlich?
+- Hat sich der Markt gegen diese Position gedreht?
+- Ist das Risiko ohne aktive Ueberwachung zu hoch?
 
-Ein Neustart des Bots allein ist KEIN Grund fuer SELL. Verkaufe nur bei echten technischen Gruenden."""
+Bei Zweifeln gilt: SELL ist sicherer als eine unkontrollierte Position zu halten.
+HOLD nur wenn das Setup klar valide ist und das Risiko ueberschaubar bleibt.
+
+HOLD = Position weiterlaufen lassen (Setup ist valide, Risiko kontrolliert)
+SELL = Sofort schliessen (zu riskant, Markt hat sich gedreht, oder Unsicherheit zu hoch)"""
 
         try:
             from google.genai import types as genai_types
@@ -407,20 +1533,13 @@ Ein Neustart des Bots allein ist KEIN Grund fuer SELL. Verkaufe nur bei echten t
                     response_mime_type="application/json",
                     response_schema=response_schema,
                     temperature=0.1,
-                    max_output_tokens=500,
+                    max_output_tokens=200,
                     thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
                 ),
             )
 
-            raw_text = response.text or "{}"
-            try:
-                result = json.loads(raw_text)
-            except json.JSONDecodeError:
-                decision = "SELL" if '"SELL"' in raw_text else "HOLD"
-                logger.warning(f"[STARTUP-REVIEW] {symbol}: JSON truncated, decision extracted: {decision}")
-                result = {"decision": decision, "confidence": 0.5, "reason": "JSON truncated", "risk_factors": []}
-
-            should_sell = result.get("decision", "HOLD") == "SELL"  # Default HOLD — Neustart kein Verkaufsgrund
+            result = json.loads(response.text or "{}")
+            should_sell = result.get("decision", "SELL") == "SELL"  # Default SELL bei Unsicherheit
             logger.info(
                 f"[STARTUP-REVIEW] {symbol}: {result.get('decision')} "
                 f"({result.get('confidence', 0):.0%}) — {result.get('reason', '')}"
@@ -782,7 +1901,6 @@ class TradeSignal:
             self.all_passed = False
             self.action = "HOLD"
             failed = [n for n, r in self.results.items() if not r["passed"]]
-            total = len(self.results)
             self.reason = f"Zu schwach: nur {passed_count}/{total} — Gemini nicht befragt. Failed: {', '.join(failed)}"
             return
 
@@ -804,12 +1922,8 @@ class TradeSignal:
             lines.append(f"  {name:<16} {status:<8} signal={r['signal']}")
         lines.append(f"{'-' * 60}")
         if self.all_passed:
-            if self.cascade_level >= 5:
-                lines.append(f"  LAYER 2: REASONING  -> Express Lane ({self.cascade_level}/7) — kein Gemini-Block")
-                lines.append(f"  LAYER 3: EXECUTION  -> Qty: {self.qty}")
-            else:
-                lines.append(f"  LAYER 2: REASONING  -> Gemini entscheidet... (blockierend)")
-                lines.append(f"  LAYER 3: EXECUTION  -> Qty: {self.qty}  ⏳ wartet auf Gemini")
+            lines.append(f"  LAYER 2: REASONING  -> Gemini entscheidet...")
+            lines.append(f"  LAYER 3: EXECUTION  -> Qty: {self.qty}")
         else:
             lines.append(f"  > HOLD (Perception Layer blockiert)")
         lines.append(f"  > REASON: {self.reason}")
@@ -824,15 +1938,11 @@ class Engine:
         self.risk = RiskManager()
         self.learner = AdaptiveLearner()
         self.reasoning = ReasoningLayer()
-        # ReasoningLayer bekommt Zugang zum AdaptiveLearner fuer Learning-Summary
-        self.reasoning._learner = self.learner
         self.watchlist = WatchlistDiscovery(self.broker)
         self.watchlist.notify = self._tg   # Telegram-Callback für Favoriten-Alerts
         self.spike_sensor = SpikeSensor(self.broker)
         self.trade_log: list[TradeSignal] = []
-        self.scan_attempts: list[dict] = []   # Alle Scan-Versuche (auch abgelehnte)
         self.position_highs: dict[str, float] = {}
-        self._zero_bar_strikes: dict[str, int] = {}  # Zählt aufeinanderfolgende 0-Bar-Fehler
         self._async_threads: list[threading.Thread] = []
         self._exit_lock = threading.Lock()
         self._stop_event = threading.Event()
@@ -840,13 +1950,6 @@ class Engine:
         self._closing_positions: set[str] = set()  # Symbole mit laufendem Close-Order
         self._pending_buys: set[str] = set()        # Symbole mit laufendem Buy-Order
         self._order_lock = threading.Lock()
-        # Kandidaten-Queue: gute Signale die wegen fehlendem Cash warten
-        self._candidate_queue: list[dict] = []      # [{"symbol": ..., "signal": ..., "ts": ...}]
-        self._candidate_lock = threading.Lock()
-        self._MAX_CANDIDATES = 5                    # Maximal 5 Kandidaten speichern
-        # Duplikat-Schutz fuer SIGNAL-Telegram-Notifications (verhindert Spam bei Order-Fehlern)
-        self._signal_notified: dict[str, float] = {}  # symbol -> timestamp der letzten Notification
-        self._SIGNAL_COOLDOWN = 300  # 5 Minuten Cooldown pro Symbol
         # Telegram-Callback (optional): wird von TradingTelegramBot gesetzt
         self.notify: Optional[callable] = None
 
@@ -867,87 +1970,6 @@ class Engine:
         self.broker.close_position(symbol)
         self.position_highs.pop(symbol, None)
         return True
-
-    def _queue_candidate(self, signal, price: float):
-        """Speichert ein Signal in der Kandidaten-Queue wenn kein Cash verfügbar."""
-        from datetime import datetime
-        with self._candidate_lock:
-            # Duplikate vermeiden
-            existing = [c["symbol"] for c in self._candidate_queue]
-            if signal.symbol in existing:
-                return
-            # Queue begrenzen: schlechtesten Kandidaten verdrängen
-            if len(self._candidate_queue) >= self._MAX_CANDIDATES:
-                self._candidate_queue.sort(key=lambda c: c["cascade_level"])
-                if signal.cascade_level <= self._candidate_queue[0]["cascade_level"]:
-                    logger.info(f"{signal.symbol}: Queue voll, Signal zu schwach für Kandidaten")
-                    return
-                self._candidate_queue.pop(0)
-            self._candidate_queue.append({
-                "symbol": signal.symbol,
-                "signal": signal,
-                "price": price,
-                "cascade_level": signal.cascade_level,
-                "ts": datetime.now(),
-            })
-            count = len(self._candidate_queue)
-            logger.info(f"{signal.symbol}: Kein Cash — in Kandidaten-Queue gespeichert ({count}/{self._MAX_CANDIDATES})")
-            self._tg(
-                f"💾 <b>Kandidat gespeichert:</b> {signal.symbol}\n"
-                f"Kaskade: {signal.cascade_label} | Preis: ${price:.2f}\n"
-                f"Queue: {count}/{self._MAX_CANDIDATES} — wird gekauft sobald Cash frei"
-            )
-
-    def _flush_candidate_queue(self):
-        """Versucht Kandidaten aus der Queue zu kaufen wenn Cash verfügbar."""
-        with self._candidate_lock:
-            if not self._candidate_queue:
-                return
-            candidates = sorted(self._candidate_queue, key=lambda c: c["cascade_level"], reverse=True)
-
-        try:
-            cash = float(self.broker.api.get_account().cash)
-        except Exception:
-            return
-
-        bought = []
-        for c in candidates:
-            symbol = c["symbol"]
-            # Nicht kaufen wenn bereits Position vorhanden
-            if self.broker.has_position(symbol):
-                bought.append(symbol)
-                continue
-            price = self.broker.get_latest_price(symbol) or c["price"]
-            if cash < price:
-                continue
-            if not self.risk.can_open_position(len(self.broker.get_positions())):
-                break
-
-            # ── Vollständige Neubewertung vor Queue-Kauf ──
-            logger.info(f"[QUEUE FLUSH] Prüfe Kandidat {symbol} erneut durch alle Layer...")
-            self._tg(f"🔄 <b>Queue-Check:</b> {symbol} wird nochmal geprüft...")
-            try:
-                new_signal = self.analyze_symbol(symbol)
-                if new_signal is None:
-                    logger.info(f"[QUEUE FLUSH] {symbol}: Signal nicht mehr gültig — aus Queue entfernt")
-                    self._tg(f"❌ <b>Queue-Kandidat veraltet:</b> {symbol} — Signal zu schwach, kein Kauf")
-                    bought.append(symbol)  # aus Queue entfernen
-                    continue
-            except Exception as e:
-                logger.warning(f"[QUEUE FLUSH] {symbol}: Neubewertung fehlgeschlagen ({e}) — überspringe")
-                continue
-
-            logger.info(f"[QUEUE FLUSH] {symbol}: Signal weiterhin gültig — kaufe @ ${price:.2f}")
-            order_id = self.broker.market_buy(symbol, new_signal.qty)
-            if order_id:
-                cash -= price * new_signal.qty
-                bought.append(symbol)
-                self.position_highs[symbol] = price
-                self._tg(f"✅ <b>Queue-Kauf ausgeführt:</b> {symbol} {new_signal.qty}x @ ${price:.2f}")
-
-        if bought:
-            with self._candidate_lock:
-                self._candidate_queue = [c for c in self._candidate_queue if c["symbol"] not in bought]
 
     def startup_position_review(self):
         """
@@ -1184,24 +2206,8 @@ class Engine:
         signal = TradeSignal(symbol)
 
         bars = self.broker.get_bars(symbol, timeframe=Config.TRADING_TIMEFRAME, limit=Config.LOOKBACK_BARS)
-        if bars.empty or len(bars) < 20:
-            bars_count = len(bars) if not bars.empty else 0
-            logger.warning(f"{symbol}: Not enough data ({bars_count} bars)")
-            # ── Auto-Remove: nur manuelle Watchlist, erst nach 3x 0 Bars ──
-            # Dynamische Symbole (WatchlistDiscovery) werden einfach übersprungen —
-            # sie werden beim nächsten Discovery-Update sowieso ersetzt.
-            is_dynamic = symbol in self.watchlist.dynamic_symbols
-            if bars_count == 0 and symbol in Config.WATCHLIST and not is_dynamic:
-                self._zero_bar_strikes[symbol] = self._zero_bar_strikes.get(symbol, 0) + 1
-                strikes = self._zero_bar_strikes[symbol]
-                logger.warning(f"[WATCHLIST] {symbol}: 0 Bars (Strike {strikes}/3)")
-                if strikes >= 3:
-                    Config.WATCHLIST.remove(symbol)
-                    self._zero_bar_strikes.pop(symbol, None)
-                    logger.warning(f"[WATCHLIST] {symbol}: 3x 0 Bars — vermutlich delisted. Automatisch entfernt.")
-                    self._tg(f"🗑 <b>{symbol}</b> von Watchlist entfernt (3x keine Kursdaten — vermutlich delisted)")
-            elif bars_count > 0 and symbol in self._zero_bar_strikes:
-                self._zero_bar_strikes.pop(symbol, None)  # Reset bei erfolgreichen Daten
+        if bars.empty or len(bars) < 50:
+            logger.warning(f"{symbol}: Not enough data ({len(bars) if not bars.empty else 0} bars)")
             signal.reason = "Insufficient data"
             return signal
 
@@ -1290,79 +2296,13 @@ class Engine:
             if price > 0:
                 signal.qty = max(1, int(bet_size / price))
 
-        # ── Scan-Versuch loggen (auch Perception-Layer-Ablehnungen) ──
-        if not signal.all_passed:
-            passed = [n for n, r in signal.results.items() if r["passed"]]
-            failed = [n for n, r in signal.results.items() if not r["passed"]]
-            self.scan_attempts.append({
-                "timestamp": datetime.now().isoformat(),
-                "symbol": symbol,
-                "price": float(bars["close"].iloc[-1]) if not bars.empty else 0,
-                "cascade_level": signal.cascade_level,
-                "cascade_label": signal.cascade_label or "—",
-                "regime": self.risk.regime.value,
-                "decision": "ABGELEHNT (Filter)",
-                "gemini_used": False,
-                "reason": signal.reason,
-                "passed": passed,
-                "failed": failed,
-                "probability_pct": None,
-                "risk_factors": [],
-            })
-            # Max 50 Eintraege behalten
-            if len(self.scan_attempts) > 50:
-                self.scan_attempts = self.scan_attempts[-50:]
-
         return signal
-
-    def _log_scan_attempt(self, signal: TradeSignal, price: float, reasoning: dict, executed: bool):
-        """Loggt jeden Gemini-Versuch (abgelehnt oder ausgefuehrt) in scan_attempts."""
-        passed = [n for n, r in signal.results.items() if r["passed"]]
-        failed = [n for n, r in signal.results.items() if not r["passed"]]
-        if executed:
-            decision = "AUSGEFUEHRT"
-        elif reasoning.get("raw_response") in ("FALLBACK", "EXPRESS_LANE"):
-            decision = "FALLBACK (kein Gemini)"
-        else:
-            decision = "ABGELEHNT (Gemini)"
-        self.scan_attempts.append({
-            "timestamp": datetime.now().isoformat(),
-            "symbol": signal.symbol,
-            "price": price,
-            "cascade_level": signal.cascade_level,
-            "cascade_label": signal.cascade_label or "—",
-            "regime": self.risk.regime.value,
-            "decision": decision,
-            "gemini_used": True,
-            "reason": reasoning.get("reason", ""),
-            "passed": passed,
-            "failed": failed,
-            "probability_pct": reasoning.get("probability_pct"),
-            "risk_factors": reasoning.get("risk_factors", []),
-        })
-        if len(self.scan_attempts) > 50:
-            self.scan_attempts = self.scan_attempts[-50:]
 
     def execute_signal(self, signal: TradeSignal) -> Optional[str]:
         if not signal.all_passed or signal.action != "BUY":
             return None
         if signal.qty <= 0:
             logger.warning(f"{signal.symbol}: All passed but qty=0")
-            return None
-
-        # ── Finnhub Earnings Blackout ──────────────────────────────────────
-        # Kein Trade wenn Earnings ≤ FINNHUB_EARNINGS_BLOCK_DAYS Tage entfernt
-        if self.reasoning.market_ctx.is_earnings_blackout(signal.symbol):
-            logger.warning(f"{signal.symbol}: EARNINGS BLACKOUT — Trade blockiert")
-            return None
-
-        # ── Auto-Blacklist: 2x Stop-Loss in 48h → 7 Tage gesperrt ──────────
-        if self.learner.is_blacklisted(signal.symbol):
-            status = self.learner.get_blacklist_status().get(signal.symbol, {})
-            logger.warning(
-                f"{signal.symbol}: BLACKLISTED — gesperrt bis {status.get('expiry', '?')} "
-                f"({status.get('remaining_h', '?')}h verbleibend)"
-            )
             return None
 
         # Kein doppelter Buy wenn bereits eine Order oder Position laeuft
@@ -1378,17 +2318,6 @@ class Engine:
                 return None
             self._pending_buys.add(signal.symbol)
 
-        # Duplikat-Schutz: offene (noch nicht gefüllte) Buy-Order → stornieren & abbrechen
-        if self.broker.has_open_order(signal.symbol):
-            cancelled = self.broker.cancel_open_buy_orders(signal.symbol)
-            logger.warning(
-                f"{signal.symbol}: {cancelled} offene Buy-Order(s) gefunden und storniert — "
-                f"Duplikat-Bug verhindert"
-            )
-            with self._order_lock:
-                self._pending_buys.discard(signal.symbol)
-            return None
-
         # Risk Manager checks
         positions = self.broker.get_positions()
         if not self.risk.can_open_position(len(positions)):
@@ -1398,29 +2327,11 @@ class Engine:
             )
             return None
 
-        # Cap qty by risk manager + Cash-Check
+        # Cap qty by risk manager
         equity = self.broker.get_equity()
         price = self.broker.get_latest_price(signal.symbol) or 1
         max_qty = self.risk.max_position_size(equity, price)
         signal.qty = min(signal.qty, max_qty)
-        if signal.qty <= 0:
-            logger.warning(f"{signal.symbol}: qty=0 nach Risk-Sizing (equity={equity:.0f}, price={price:.2f}) — abgebrochen")
-            with self._order_lock:
-                self._pending_buys.discard(signal.symbol)
-            return None
-
-        # Kein Cash → Kandidaten-Queue
-        cash = self.broker.api.get_account().cash
-        try:
-            cash = float(cash)
-        except Exception:
-            cash = 0.0
-        min_order_value = price * 1  # mindestens 1 Aktie
-        if cash < min_order_value:
-            self._queue_candidate(signal, price)
-            with self._order_lock:
-                self._pending_buys.discard(signal.symbol)
-            return None
 
         # ── SCHICHT 2: Reasoning Layer ──
         # EXPRESS LANE: ab 5/7 → sofort handeln, Gemini prüft async ob HALTEN oder VERKAUFEN
@@ -1464,48 +2375,28 @@ class Engine:
             )
             if reasoning["risk_factors"]:
                 logger.warning(f"  Risiken: {', '.join(reasoning['risk_factors'])}")
-            prob = reasoning.get('probability_pct', round(reasoning['confidence'] * 100))
-            print(f"  > GEMINI: HOLD — {prob}% — {reasoning['reason']}")
-            if reasoning["risk_factors"]:
-                print(f"  > RISIKEN: {', '.join(reasoning['risk_factors'])}")
-            print(f"{'=' * 60}\n")
-            risk_str = f"\nRisiken: {', '.join(reasoning['risk_factors'])}" if reasoning["risk_factors"] else ""
-            self._tg(
-                f"🚫 <b>GEMINI: HOLD — {signal.symbol}</b>\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"Kaskade: <b>{signal.cascade_label}</b>\n"
-                f"Gemini: {prob}% — {reasoning['reason']}{risk_str}"
-            )
-            self._log_scan_attempt(signal, price, reasoning, executed=False)
             return None
 
-        prob = reasoning.get('probability_pct', round(reasoning['confidence'] * 100))
-        print(f"  > GEMINI: BUY ✓ — {prob}% — {reasoning['reason']}")
-        print(f"{'=' * 60}\n")
         logger.info(f"{'=' * 40}")
         logger.info(f"EXECUTING: BUY {signal.qty}x {signal.symbol}")
         logger.info(f"Regime: {self.risk.regime.value} | {self.risk.params['description']}")
         logger.info(f"Gemini: {reasoning.get('probability_pct', round(reasoning['confidence']*100))}% — {reasoning['reason']}")
         logger.info(f"{'=' * 40}")
 
-        # ── PRE-TRADE Telegram Alert (mit Cooldown gegen Duplikat-Spam) ──
-        now_ts = time.time()
-        last_notified = self._signal_notified.get(signal.symbol, 0)
-        if now_ts - last_notified >= self._SIGNAL_COOLDOWN:
-            passed_names  = [n for n, r in signal.results.items() if r["passed"]]
-            failed_names  = [n for n, r in signal.results.items() if not r["passed"]]
-            self._tg(
-                f"⚡ <b>SIGNAL: BUY {signal.qty}x {signal.symbol}</b>\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"Kaskade: <b>{signal.cascade_label}</b>\n"
-                f"Regime:  {self.risk.regime.value}\n"
-                f"Preis:   ${price:.2f}\n"
-                f"Wert:    ~${signal.qty * price:,.0f}\n"
-                f"✅ {', '.join(passed_names)}\n"
-                + (f"❌ {', '.join(failed_names)}\n" if failed_names else "")
-                + f"<i>Order wird jetzt platziert...</i>"
-            )
-            self._signal_notified[signal.symbol] = now_ts
+        # ── PRE-TRADE Telegram Alert ──
+        passed_names  = [n for n, r in signal.results.items() if r["passed"]]
+        failed_names  = [n for n, r in signal.results.items() if not r["passed"]]
+        self._tg(
+            f"⚡ <b>SIGNAL: BUY {signal.qty}x {signal.symbol}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Kaskade: <b>{signal.cascade_label}</b>\n"
+            f"Regime:  {self.risk.regime.value}\n"
+            f"Preis:   ${price:.2f}\n"
+            f"Wert:    ~${signal.qty * price:,.0f}\n"
+            f"✅ {', '.join(passed_names)}\n"
+            + (f"❌ {', '.join(failed_names)}\n" if failed_names else "")
+            + f"<i>Order wird jetzt platziert...</i>"
+        )
 
         # Stoikov self-deciding: Limit-Order wenn Reservation Price verfuegbar
         stoikov_result = signal.results.get("Stoikov", {})
@@ -1530,9 +2421,6 @@ class Engine:
             signal.reason += f" -> Order {order_id}"
             self.trade_log.append(signal)
             self.position_highs[signal.symbol] = price
-            self._log_scan_attempt(signal, price, reasoning, executed=True)
-            # Cooldown nach erfolgreicher Order zurücksetzen (nächster Trade soll wieder notifiziert werden)
-            self._signal_notified.pop(signal.symbol, None)
 
             # ── ORDER PLACED Telegram Alert ──
             order_type = "LIMIT" if (signal.results.get("Stoikov", {}).get("passed") and
@@ -1602,19 +2490,6 @@ class Engine:
         # Kill-Switch Check
         if self.risk.check_kill_switch(equity):
             logger.critical("KILL SWITCH ACTIVE — closing ALL positions")
-            drawdown = (equity - self.risk.peak_equity) / self.risk.peak_equity if self.risk.peak_equity > 0 else 0
-            daily_chg = (equity - self.risk.start_of_day_equity) / self.risk.start_of_day_equity if self.risk.start_of_day_equity > 0 else 0
-            trigger = "Max Drawdown" if drawdown < -self.risk.max_drawdown_limit else "Tagesverlust"
-            self._tg(
-                f"🚨 <b>KILL SWITCH AKTIVIERT</b>\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"Auslöser: <b>{trigger}</b>\n"
-                f"Equity:       ${equity:,.2f}\n"
-                f"Drawdown:  {drawdown:+.1%} (Peak: ${self.risk.peak_equity:,.2f})\n"
-                f"Heute:        {daily_chg:+.1%}\n"
-                f"⛔ Alle {len(positions)} Position(en) werden geschlossen.\n"
-                f"Keine neuen Trades bis manueller Reset."
-            )
             for symbol in positions:
                 with self._order_lock:
                     if symbol not in self._closing_positions:
@@ -1627,31 +2502,19 @@ class Engine:
                 # Kein doppelter Close wenn bereits eine Order laeuft
                 with self._order_lock:
                     if symbol in self._closing_positions:
-                        # Prüfen ob Sell-Order noch aktiv — sonst Sperre aufheben
-                        if self.broker.has_open_order(symbol, side="sell"):
-                            continue
-                        else:
-                            self._closing_positions.discard(symbol)
+                        continue
 
                 bars = self.broker.get_bars(symbol, timeframe=Config.TRADING_TIMEFRAME, limit=50)
-
-                # ATR berechnen (Fallback wenn keine Bars: 1% des Entry-Preises)
-                entry_price = pos["avg_entry"]
                 if bars.empty:
-                    atr = entry_price * 0.01
-                    logger.warning(f"[EXIT] {symbol}: Keine Bars — ATR-Fallback {atr:.4f}")
-                else:
-                    atr = compute_atr(bars)
+                    continue
 
-                # Echtzeit-Preis für Stop-Loss/TP-Prüfung (nicht Bar-Close der veraltet sein kann)
-                live_price = self.broker.get_latest_price(symbol)
-                if not live_price or live_price <= 0:
-                    if not bars.empty:
-                        live_price = bars["close"].iloc[-1]
-                    else:
-                        logger.warning(f"[EXIT] {symbol}: Kein Preis verfügbar — überspringe")
-                        continue
-                current_price = live_price
+                # KEIN update_regime hier — Regime wird global in scan_once() gesetzt
+                # (verhindert Regime-Flip durch unterschiedliche Symbol-Volatilitaet)
+
+                # ATR berechnen
+                atr = compute_atr(bars)
+                entry_price = pos["avg_entry"]
+                current_price = bars["close"].iloc[-1]
 
                 # Highest price tracken (fuer Trailing Stop)
                 if symbol not in self.position_highs:
@@ -1685,15 +2548,6 @@ class Engine:
                             continue
                         self._closing_positions.add(symbol)
 
-                    pl_icon = "🟢" if plpc >= 0 else "🔴"
-                    self._tg(
-                        f"{pl_icon} <b>EXIT: {symbol}</b>\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"Grund:    <b>{exit_decision['reason']}</b>\n"
-                        f"P/L:      <b>{plpc:+.1%}</b>\n"
-                        f"Einstieg: ${entry_price:.2f} → Aktuell: ${current_price:.2f}\n"
-                        f"Regime:   {self.risk.regime.value}"
-                    )
                     self.broker.close_position(symbol)
                     self.position_highs.pop(symbol, None)
 
@@ -1702,48 +2556,14 @@ class Engine:
                         symbol, current_price, exit_decision["reason"]
                     )
 
-                    # ── Kandidaten-Queue: Cash ist frei, sofort kaufen ──
-                    threading.Thread(
-                        target=self._flush_candidate_queue, daemon=True
-                    ).start()
-
             except Exception as e:
                 logger.error(f"Exit check error {symbol}: {e}")
-
-    def _refresh_learning_summary_async(self):
-        """
-        Generiert die Learning-Summary im Hintergrund-Thread.
-        Wird von scan_once() alle 2h ausgeloest wenn genug Daten vorhanden.
-        """
-        def _run():
-            try:
-                summary = self.learner.generate_learning_summary(self.reasoning.client)
-                if summary:
-                    logger.info("[LEARNING] Summary aktualisiert — wird in naechste Gemini-Prompts injiziert")
-                    # Telegram-Notification: erste 3 nicht-leere Zeilen zeigen
-                    lines = [l.strip() for l in summary.split("\n") if l.strip()]
-                    preview = "\n".join(lines[:3])[:400]
-                    self._tg(
-                        f"🧠 <b>Bot-Lernupdate</b>\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"<i>{preview}</i>"
-                    )
-            except Exception as e:
-                logger.error(f"[LEARNING] Hintergrund-Refresh fehlgeschlagen: {e}")
-
-        t = threading.Thread(target=_run, daemon=True, name="learning-summary")
-        t.start()
-        self._async_threads.append(t)
 
     def scan_once(self, market_status: str) -> list[str]:
         """
         Scannt aktive Watchlist + Spike-Sensor Universum.
         Gibt Liste der erkannten Spike-Symbole zurück (für Telegram-Alerts).
         """
-        # ── Learning Summary periodisch aktualisieren (alle 2h) ──
-        if self.learner.should_refresh_learning_summary():
-            self._refresh_learning_summary_async()
-
         # Regime EINMAL global updaten (SPY = Marktproxy) — nicht per Symbol
         try:
             spy_bars = self.broker.get_bars("SPY", timeframe="5Min", limit=30)
@@ -1851,3 +2671,5 @@ class Engine:
         finally:
             self._stop_event.set()
             exit_thread.join(timeout=5)
+
+

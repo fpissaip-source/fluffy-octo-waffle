@@ -18,6 +18,33 @@ from config import Config
 from engine import Engine
 from broker import AlpacaBroker
 
+_LOCK_FILE = "/tmp/trading_bot.pid"
+
+
+def _acquire_lock():
+    """Ensure only one bot instance runs. Exit if another is already running."""
+    if os.path.exists(_LOCK_FILE):
+        try:
+            with open(_LOCK_FILE) as f:
+                pid = int(f.read().strip())
+            # Check if process is still alive
+            os.kill(pid, 0)
+            print(f"\n  FEHLER: Bot laeuft bereits (PID {pid})!")
+            print(f"  Stoppe die andere Instanz zuerst, oder loesche {_LOCK_FILE}\n")
+            sys.exit(1)
+        except (ProcessLookupError, ValueError):
+            pass  # Stale lock file — process no longer running
+
+    with open(_LOCK_FILE, "w") as f:
+        f.write(str(os.getpid()))
+
+
+def _release_lock():
+    try:
+        os.remove(_LOCK_FILE)
+    except FileNotFoundError:
+        pass
+
 
 def setup_logging():
     level = getattr(logging, Config.LOG_LEVEL.upper(), logging.INFO)
@@ -83,6 +110,10 @@ def main():
     args = parser.parse_args()
 
     setup_logging()
+    _acquire_lock()
+
+    import atexit
+    atexit.register(_release_lock)
 
     if not Config.validate():
         print("\n  API Keys nicht konfiguriert!")
@@ -106,24 +137,47 @@ def main():
     elif args.backtest:
         cmd_backtest()
     else:
-        # Always start the API dashboard for long-running modes
+        import threading
         from api import start_api_server
-        engine = Engine()
-        start_api_server(broker=engine.broker, port=int(os.getenv("BOT_API_PORT", "5001")))
 
-        if args.telegram:
-            if not Config.TELEGRAM_TOKEN or Config.TELEGRAM_TOKEN == "your_telegram_bot_token_here":
-                print("  Telegram nicht konfiguriert!")
-                print("  Trage TELEGRAM_TOKEN und TELEGRAM_CHAT_ID in .env ein.")
-                print("  Siehe README fuer Anleitung.\n")
-                sys.exit(1)
-            import threading
-            t = threading.Thread(target=engine.run, daemon=True, name="engine")
-            t.start()
+        telegram_configured = (
+            Config.TELEGRAM_TOKEN
+            and Config.TELEGRAM_TOKEN != "your_telegram_bot_token_here"
+            and Config.TELEGRAM_CHAT_ID
+        )
+
+        if telegram_configured:
+            # Kurz warten damit ein evtl. laufender alter Bot-Prozess Telegram freigibt
+            import time
+            time.sleep(3)
+            # Telegram-Bot ZUERST starten — antwortet sofort auf Nachrichten
+            # Engine laeuft im Hintergrund (Initialisierung kann dauern)
             from telegram_bot import TradingTelegramBot
             bot = TradingTelegramBot()
-            bot.run()
+
+            def _engine_thread():
+                try:
+                    eng = Engine()
+                    start_api_server(broker=eng.broker, port=int(os.getenv("BOT_API_PORT", "5001")))
+                    eng.notify = bot.send_sync
+                    bot.engine = eng
+                    bot.is_running = True
+                    bot.send_sync("✅ Trading Engine bereit. /status fuer Account-Info.")
+                    eng.run()
+                except Exception as e:
+                    bot.send_sync(f"❌ Engine Fehler beim Start: {e}")
+
+            t = threading.Thread(target=_engine_thread, daemon=True, name="engine")
+            t.start()
+            bot.run()  # Blockiert im Hauptthread — bot antwortet schon ab hier
+        elif args.telegram:
+            print("  Telegram nicht konfiguriert!")
+            print("  Trage TELEGRAM_TOKEN und TELEGRAM_CHAT_ID in .env ein.")
+            print("  Siehe README fuer Anleitung.\n")
+            sys.exit(1)
         else:
+            engine = Engine()
+            start_api_server(broker=engine.broker, port=int(os.getenv("BOT_API_PORT", "5001")))
             engine.run()
 
 

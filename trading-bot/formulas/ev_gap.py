@@ -31,8 +31,17 @@ def evaluate(bars: pd.DataFrame, **kwargs) -> dict:
     upside = abs(gap_pct) if gap_pct > 0 else abs(gap_pct) * 0.3
     downside = abs(gap_pct) * 0.5
 
-    # Slippage & Gebuehren vom EV abziehen
-    cost_pct = (Config.SLIPPAGE_BPS + Config.FEE_BPS) / 10000 * 2  # Roundtrip
+    # Dynamische Slippage: Penny Stocks / OTC haben viel hoehere Kosten
+    spread = kwargs.get("spread", 0.0)
+    if spread and spread > 0 and current_price > 0:
+        slippage_pct = spread / current_price
+    elif current_price < 1.0:
+        slippage_pct = 0.01   # 100 bps
+    elif current_price < 5.0:
+        slippage_pct = 0.005  # 50 bps
+    else:
+        slippage_pct = Config.SLIPPAGE_BPS / 10000
+    cost_pct = (slippage_pct + Config.FEE_BPS / 10000) * 2  # Roundtrip
     net_upside = max(upside - cost_pct, 0.0)
     net_downside = downside + cost_pct
     ev = win_prob * net_upside - (1 - win_prob) * net_downside
@@ -50,5 +59,6 @@ def evaluate(bars: pd.DataFrame, **kwargs) -> dict:
             "ev": round(ev, 5),
             "direction": direction,
             "cost_pct": f"{cost_pct*100:.3f}%",
+            "slippage_bps": round(slippage_pct * 10000, 1),
         },
     }

@@ -14,22 +14,32 @@ class Config:
 
     WATCHLIST: list[str] = [
         s.strip() for s in os.getenv(
-            "WATCHLIST", "NVDA,META,BTCUSD,ETHUSD"
+            "WATCHLIST", "NVDA,META,BTCUSD,ETHUSD,DVLT"
         ).split(",")
     ]
 
     MAX_POSITION_PCT: float = float(os.getenv("MAX_POSITION_PCT", "0.10"))
     KELLY_FRACTION: float = float(os.getenv("KELLY_FRACTION", "0.25"))
-    MIN_EV_GAP: float = float(os.getenv("MIN_EV_GAP", "0.02"))
-    MIN_MOMENTUM_SCORE: float = 0.6
+    MIN_EV_GAP: float = float(os.getenv("MIN_EV_GAP", "0.01"))
+    MIN_MOMENTUM_SCORE: float = float(os.getenv("MIN_MOMENTUM_SCORE", "0.50"))
     KL_DIVERGENCE_THRESHOLD: float = 0.15
     MIN_BAYESIAN_POSTERIOR: float = 0.60
     STOIKOV_SPREAD_MULT: float = 1.5
 
     SCAN_INTERVAL: int = int(os.getenv("SCAN_INTERVAL", "30"))
-    LOOKBACK_BARS: int = 100
+    LOOKBACK_BARS: int = 200  # 200 × 15min ≈ 50h ≈ 6 Handelstage
     SHORT_WINDOW: int = 10
     LONG_WINDOW: int = 30
+
+    # ── Chart-Timeframe (Daytrading: "5Min" / Swing: "1Hour") ──
+    # Bestimmt: Kerzenbreite für alle Formeln, ATR-Weite der Stops,
+    # Gleitende Durchschnitte, EV-Gap, Momentum — alles skaliert mit.
+    TRADING_TIMEFRAME: str = os.getenv("TRADING_TIMEFRAME", "15Min")
+
+    # ── News / Sentiment Horizont ──
+    NEWS_LOOKBACK_HOURS: int = int(os.getenv("NEWS_LOOKBACK_HOURS", "72"))   # 3 Tage für Swing-Kontext
+    NEWS_MAX_ARTICLES:   int = int(os.getenv("NEWS_MAX_ARTICLES",   "30"))   # Mehr Artikel = breiteres Bild
+    SENTIMENT_GEMINI_HEADLINES: int = 25                                      # Gemini bekommt Top 25 Headlines
 
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 
@@ -42,6 +52,10 @@ class Config:
 
     # ── LunarCrush (optional — Crypto Sentiment) ──
     LUNARCRUSH_API_KEY: str = os.getenv("LUNARCRUSH_API_KEY", "")
+
+    # ── Finnhub (Earnings Calendar + Insider Trades) ──
+    FINNHUB_API_KEY: str = os.getenv("FINNHUB_API_KEY", "")
+    FINNHUB_EARNINGS_BLOCK_DAYS: int = 3   # Kein Trade wenn Earnings ≤3 Tage entfernt
 
     # ── Reasoning Layer Einstellungen ──
     REASONING_MODEL: str = "gemini-2.5-flash"

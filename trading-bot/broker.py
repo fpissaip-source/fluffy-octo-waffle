@@ -1,6 +1,8 @@
 """broker.py — Alpaca API Wrapper. Handles account, market data, orders."""
 
 import logging
+import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -8,9 +10,18 @@ import alpaca_trade_api as tradeapi
 import pandas as pd
 import numpy as np
 
+try:
+    import yfinance as yf
+    _YFINANCE_AVAILABLE = True
+except ImportError:
+    _YFINANCE_AVAILABLE = False
+
 from config import Config
 
 logger = logging.getLogger("bot.broker")
+
+# Symbole ohne IEX-Daten — werden nicht nochmal versucht (bis Bot-Neustart)
+_iex_blacklist: set[str] = set()
 
 CRYPTO_SYMBOLS = {"BTCUSD", "ETHUSD", "SOLUSD", "AVAXUSD", "LINKUSD"}
 
@@ -66,7 +77,35 @@ class AlpacaBroker:
     def has_position(self, symbol: str) -> bool:
         return symbol in self.get_positions()
 
+    def has_open_order(self, symbol: str, side: str = "buy") -> bool:
+        """True wenn bereits eine offene Order (buy oder sell) für dieses Symbol existiert."""
+        try:
+            orders = self.api.list_orders(status="open", symbols=[symbol])
+            return any(o.side == side for o in orders)
+        except Exception:
+            return False
+
+    def cancel_open_buy_orders(self, symbol: str) -> int:
+        """Storniert alle offenen Buy-Orders für ein Symbol. Gibt Anzahl zurück."""
+        try:
+            orders = self.api.list_orders(status="open", symbols=[symbol])
+            cancelled = 0
+            for o in orders:
+                if o.side == "buy":
+                    self.api.cancel_order(o.id)
+                    cancelled += 1
+            return cancelled
+        except Exception as e:
+            logger.warning(f"cancel_open_buy_orders({symbol}): {e}")
+            return 0
+
     def get_bars(self, symbol: str, timeframe: str = "5Min", limit: int = 100) -> pd.DataFrame:
+        global _iex_blacklist
+
+        # Sofort überspringen wenn kein IEX-Daten bekannt
+        if symbol in _iex_blacklist:
+            return pd.DataFrame()
+
         tf_map = {
             "1Min": tradeapi.TimeFrame.Minute,
             "5Min": tradeapi.TimeFrame(5, tradeapi.TimeFrameUnit.Minute),
@@ -76,7 +115,9 @@ class AlpacaBroker:
         }
         tf = tf_map.get(timeframe, tradeapi.TimeFrame(5, tradeapi.TimeFrameUnit.Minute))
         end = datetime.now()
-        start = end - timedelta(days=max(7, limit // 78 + 3))
+        _bars_per_day = {"1Min": 390, "5Min": 78, "15Min": 26, "1Hour": 7, "1Day": 1}
+        _bpd = _bars_per_day.get(timeframe, 78)
+        start = end - timedelta(days=max(14, (limit // _bpd + 3) * 2))
 
         is_crypto = symbol.upper() in CRYPTO_SYMBOLS
 
@@ -86,21 +127,81 @@ class AlpacaBroker:
             limit=limit,
         )
 
-        if is_crypto:
-            bars = self.api.get_crypto_bars(_alpaca_crypto(symbol), tf, **kwargs).df
-        else:
-            kwargs["feed"] = "iex"
-            bars = self.api.get_bars(symbol, tf, **kwargs).df
+        try:
+            if is_crypto:
+                def _fetch():
+                    return self.api.get_crypto_bars(_alpaca_crypto(symbol), tf, **kwargs).df
+            else:
+                kwargs["feed"] = "iex"
+                def _fetch():
+                    return self.api.get_bars(symbol, tf, **kwargs).df
+
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_fetch)
+                try:
+                    bars = future.result(timeout=6)
+                except FuturesTimeoutError:
+                    logger.warning(f"Bars timeout für {symbol} — zur Blacklist hinzugefügt")
+                    _iex_blacklist.add(symbol)
+                    return pd.DataFrame()
+
+        except Exception as e:
+            logger.warning(f"Bars fetch fehlgeschlagen für {symbol}: {e}")
+            return pd.DataFrame()
 
         if bars.empty:
-            logger.warning(f"No bars for {symbol}")
-            return pd.DataFrame()
+            logger.warning(f"No bars for {symbol} via IEX — versuche yfinance Fallback")
+            _iex_blacklist.add(symbol)
+            return self._get_bars_yfinance(symbol, timeframe, limit)
 
         bars = bars.tail(limit).copy()
         bars["returns"] = bars["close"].pct_change()
         bars["log_returns"] = np.log(bars["close"] / bars["close"].shift(1))
         bars.dropna(inplace=True)
         return bars
+
+    def _get_bars_yfinance(self, symbol: str, timeframe: str = "1Hour", limit: int = 100) -> pd.DataFrame:
+        """Fallback: Bars via Yahoo Finance wenn IEX keine Daten liefert."""
+        if not _YFINANCE_AVAILABLE:
+            logger.warning(f"yfinance nicht installiert — kein Fallback für {symbol}")
+            return pd.DataFrame()
+
+        tf_map = {
+            "1Min": "1m", "5Min": "5m", "15Min": "15m",
+            "1Hour": "1h", "1Day": "1d",
+        }
+        yf_interval = tf_map.get(timeframe, "1h")
+
+        # Zeitraum: genug History für limit Bars
+        period_map = {
+            "1m": "7d", "5m": "60d", "15m": "60d",
+            "1h": "730d", "1d": "2y",
+        }
+        period = period_map.get(yf_interval, "60d")
+
+        try:
+            ticker = yf.Ticker(symbol)
+            raw = ticker.history(period=period, interval=yf_interval, auto_adjust=True)
+            if raw.empty:
+                logger.warning(f"yfinance: Keine Daten für {symbol}")
+                return pd.DataFrame()
+
+            bars = raw.rename(columns={
+                "Open": "open", "High": "high", "Low": "low",
+                "Close": "close", "Volume": "volume",
+            })[["open", "high", "low", "close", "volume"]].copy()
+
+            bars = bars.tail(limit)
+            bars["returns"] = bars["close"].pct_change()
+            bars["log_returns"] = np.log(bars["close"] / bars["close"].shift(1))
+            bars.dropna(inplace=True)
+
+            logger.info(f"[yfinance] {symbol}: {len(bars)} Bars geladen (Fallback)")
+            return bars
+
+        except Exception as e:
+            logger.warning(f"yfinance Fallback fehlgeschlagen für {symbol}: {e}")
+            return pd.DataFrame()
 
     def _get_crypto_price(self, symbol: str) -> Optional[float]:
         """Crypto-Preis via letztem 1-Minuten-Bar (get_latest_crypto_trade nicht verfügbar)."""
@@ -156,7 +257,8 @@ class AlpacaBroker:
     def market_buy(self, symbol: str, qty: int) -> Optional[str]:
         try:
             status = self.get_market_status()
-            if status == "extended":
+            is_crypto = symbol.upper() in CRYPTO_SYMBOLS
+            if status == "extended" and not is_crypto:
                 # Extended hours: Limit-Order leicht über Marktpreis (0.1% Slippage)
                 price = self.get_latest_price(symbol)
                 if not price:
@@ -170,6 +272,12 @@ class AlpacaBroker:
                     extended_hours=True,
                 )
                 logger.info(f"BUY {qty}x {symbol} @ LIMIT ${limit_price:.2f} [EXT] -> Order {order.id}")
+            elif is_crypto:
+                # Crypto: GTC (Alpaca unterstützt kein "day" für Crypto-Market-Orders)
+                order = self.api.submit_order(
+                    symbol=symbol, qty=qty, side="buy", type="market", time_in_force="gtc",
+                )
+                logger.info(f"BUY {qty}x {symbol} @ MARKET [CRYPTO GTC] -> Order {order.id}")
             else:
                 order = self.api.submit_order(
                     symbol=symbol, qty=qty, side="buy", type="market", time_in_force="day",
@@ -208,11 +316,59 @@ class AlpacaBroker:
 
     def close_position(self, symbol: str) -> Optional[str]:
         try:
-            order = self.api.close_position(symbol)
+            market_status = self.get_market_status()
+            crypto = symbol.upper().endswith("USD") and not symbol.upper().endswith("BUSD")
+
+            if crypto:
+                # Crypto: GTC Market-Order (24/7)
+                order = self.api.submit_order(
+                    symbol=symbol, side="sell", type="market",
+                    time_in_force="gtc", qty=self._get_position_qty(symbol),
+                )
+            elif market_status == "extended":
+                # Extended Hours: IMMER Limit-Order (Market-Orders funktionieren nicht!)
+                qty = self._get_position_qty(symbol)
+                # Echtzeit-Preis als Basis (nicht Entry-Preis - der kann weit über Markt liegen!)
+                live = self.get_latest_price(symbol)
+                snap = self.get_snapshot(symbol) if not live else None
+                bid = snap.get("bid") if snap else None
+                # Fallback-Kette: Echtzeit > Bid aus Snapshot
+                limit_price = live or bid
+                if limit_price and limit_price > 0 and qty:
+                    # 0.5% unter aktuellem Preis → sofortiger Fill im Pre/After-Market
+                    limit_price = round(limit_price * 0.995, 2)
+                    order = self.api.submit_order(
+                        symbol=symbol, qty=qty, side="sell",
+                        type="limit", time_in_force="day",
+                        limit_price=limit_price,
+                        extended_hours=True,
+                    )
+                else:
+                    order = self.api.close_position(symbol)
+            else:
+                # Reguläre Marktzeiten: Market-Order
+                order = self.api.close_position(symbol)
+
             logger.info(f"CLOSE {symbol} -> Order {order.id}")
             return order.id
         except Exception as e:
-            logger.error(f"Close failed {symbol}: {e}")
+            err = str(e).lower()
+            if "insufficient qty" in err or "position does not exist" in err:
+                logger.info(f"CLOSE {symbol}: Position bereits geschlossen — ignoriert")
+            elif "403" in err or "forbidden" in err:
+                # PDT, Account-Sperre oder reservierte Shares → genaue Meldung zeigen
+                logger.error(f"CLOSE {symbol} 403 FORBIDDEN: {e} | Mögliche Ursachen: "
+                             f"PDT-Schutz (<$25K Equity), Account gesperrt, oder offene Orders reservieren Shares")
+            else:
+                logger.error(f"Close failed {symbol}: {e}")
+            return None
+
+    def _get_position_qty(self, symbol: str) -> Optional[int]:
+        """Gibt die aktuelle Qty einer Position zurück."""
+        try:
+            pos = self.api.get_position(symbol)
+            return int(float(pos.qty))
+        except Exception:
             return None
 
     def get_snapshots_batch(self, symbols: list) -> dict:
@@ -233,16 +389,21 @@ class AlpacaBroker:
         clock = self.api.get_clock()
         if clock.is_open:
             return "open"
-        now = datetime.now(timezone.utc)
-        next_open = clock.next_open.replace(tzinfo=timezone.utc)
-        next_close = clock.next_close.replace(tzinfo=timezone.utc)
-        # Pre-market: 4h before open; After-hours: up to 4h after close
-        pre_market_start = next_open - timedelta(hours=5.5)
-        # After-hours: market closed but within same trading day window
-        prev_close = next_close - timedelta(hours=6.5)
-        after_hours_end = prev_close + timedelta(hours=4)
-        if pre_market_start <= now < next_open:
-            return "extended"
-        if prev_close < now <= after_hours_end:
-            return "extended"
+        # ET-Zeit dynamisch berechnen (EDT=UTC-4 / EST=UTC-5 je nach Jahreszeit)
+        now_utc = datetime.now(timezone.utc)
+        try:
+            import zoneinfo
+            now_et = now_utc.astimezone(zoneinfo.ZoneInfo("America/New_York"))
+        except Exception:
+            # Fallback: EDT (UTC-4) wenn zoneinfo nicht verfügbar
+            now_et = now_utc - timedelta(hours=4)
+        et_hour = now_et.hour + now_et.minute / 60
+        weekday = now_et.weekday()  # 0=Mo, 6=So
+        if weekday < 5:  # Mo–Fr
+            # Pre-market: 04:00–09:30 ET
+            if 4.0 <= et_hour < 9.5:
+                return "extended"
+            # After-hours: 16:00–20:00 ET
+            if 16.0 <= et_hour < 20.0:
+                return "extended"
         return "closed"

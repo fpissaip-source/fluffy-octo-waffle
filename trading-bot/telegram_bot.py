@@ -14,6 +14,9 @@ Befehle:
     /resume       - Bot fortsetzen
     /stop         - Bot komplett stoppen
     /screener     - Top-Mover Screener (penny/micro/sub)
+    /closeall     - Alle Positionen sofort schliessen
+    /erklaer      - Letzter Trade + 2 Versuche + Regime erklaert
+    /test DVLT    - Symbol einmal durch alle 7 Layer schicken (detailliertes Ergebnis)
 """
 
 import asyncio
@@ -35,11 +38,11 @@ logger = logging.getLogger("bot.telegram")
 
 
 class TradingTelegramBot:
-    def __init__(self):
+    def __init__(self, engine: Optional[Engine] = None):
         self.token = Config.TELEGRAM_TOKEN
         self.chat_id = Config.TELEGRAM_CHAT_ID
-        self.engine: Optional[Engine] = None
-        self.is_running = False
+        self.engine: Optional[Engine] = engine
+        self.is_running = engine is not None
         self.is_paused = False
         self.scan_thread: Optional[threading.Thread] = None
         self.app: Optional[Application] = None
@@ -76,32 +79,39 @@ class TradingTelegramBot:
 
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = (
-            "<b>SIX FILTERS. ONE TRADE.</b>\n"
+            "<b>TRADING BOT v2.0</b>\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "Trading Engine v2.0 bereit.\n\n"
-            "<b>Monitoring:</b>\n"
-            "/status  — Account anzeigen\n"
-            "/positions — Offene Positionen\n"
-            "/regime  — Markt-Regime + Risk\n"
+            "<b>📊 Monitoring:</b>\n"
+            "/status      — Account &amp; Equity\n"
+            "/positions   — Offene Positionen\n"
+            "/stoplosses  — Positionen + Stop-Loss Level\n"
+            "/orders      — Offene (ungefüllte) Orders\n"
+            "/regime      — Markt-Regime + Risk\n"
             "/sentiment AAPL — News-Analyse\n\n"
-            "<b>Trading:</b>\n"
-            "/scan    — Einmal scannen\n"
-            "/run     — Auto-Scan starten\n"
-            "/pause   — Bot pausieren\n"
-            "/resume  — Bot fortsetzen\n"
-            "/stop    — Auto-Scan stoppen\n\n"
-            "<b>Analyse:</b>\n"
-            "/stats   — Performance-Stats\n"
-            "/weights — Gelernte Gewichte\n"
-            "/trades  — Heutige Trades\n\n"
-            "<b>Screener:</b>\n"
-            "/screener       — Top-Mover (alle)\n"
-            "/screener penny — Penny Stocks &lt;$5\n"
-            "/screener micro — unter $1\n"
-            "/screener sub   — Sub-Penny &lt;$0.01\n\n"
-            "<b>Watchlist:</b>\n"
-            "/watchlist — Symbole anzeigen\n"
-            "/add TSLA — Hinzufuegen\n"
+            "<b>⚡ Trading:</b>\n"
+            "/scan        — Einmal scannen\n"
+            "/run         — Auto-Scan starten\n"
+            "/pause       — Bot pausieren\n"
+            "/resume      — Bot fortsetzen\n"
+            "/stop        — Auto-Scan stoppen\n"
+            "/closeall    — Alle Positionen schliessen (15min Sperre)\n"
+            "/cancelbuy   — Alle offenen BUY-Orders canceln\n\n"
+            "<b>💾 Kandidaten-Queue:</b>\n"
+            "/queue       — Wartende Signale anzeigen (kein Cash)\n\n"
+            "<b>📈 Analyse:</b>\n"
+            "/erklaer     — Letzter Trade + Versuche erklärt\n"
+            "/stats       — Performance-Stats\n"
+            "/weights     — Gelernte Gewichte\n"
+            "/trades      — Heutige Trades\n"
+            "/test TSLA   — Symbol durch alle 7 Layer schicken\n\n"
+            "<b>🔍 Screener:</b>\n"
+            "/screener        — Top-Mover (alle)\n"
+            "/screener penny  — Penny Stocks &lt;$5\n"
+            "/screener micro  — unter $1\n"
+            "/screener sub    — Sub-Penny &lt;$0.01\n\n"
+            "<b>📋 Watchlist:</b>\n"
+            "/watchlist   — Symbole anzeigen\n"
+            "/add TSLA    — Hinzufuegen\n"
             "/remove TSLA — Entfernen\n"
         )
         await update.message.reply_text(text, parse_mode="HTML")
@@ -120,6 +130,17 @@ class TradingTelegramBot:
             mode = "PAPER" if Config.is_paper() else "LIVE"
             bot_status = "PAUSED" if self.is_paused else "RUNNING" if self.is_running else "IDLE"
 
+            # Blacklist-Status
+            blacklist_section = ""
+            if self.engine:
+                bl = self.engine.learner.get_blacklist_status()
+                if bl:
+                    bl_lines = "\n".join(
+                        f"  • <b>{sym}</b> — noch {info['remaining_h']}h gesperrt"
+                        for sym, info in bl.items()
+                    )
+                    blacklist_section = f"━━━━━━━━━━━━━━━━━━━━━━\n🚫 <b>Gesperrte Symbole ({len(bl)}):</b>\n{bl_lines}\n"
+
             text = (
                 f"<b>ACCOUNT STATUS</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -131,6 +152,7 @@ class TradingTelegramBot:
                 f"Cash:         ${cash:,.2f}\n"
                 f"Buying Power: ${bp:,.2f}\n"
                 f"Positions:    {len(positions)}\n"
+                + blacklist_section
             )
             await update.message.reply_text(text, parse_mode="HTML")
         except Exception as e:
@@ -251,7 +273,9 @@ class TradingTelegramBot:
 
         self.is_running = True
         self.is_paused = False
-        self.engine = Engine()
+        if self.engine is None:
+            self.engine = Engine()
+        self.engine.notify = self.send_sync   # Telegram-Callback direkt in Engine
         self.scan_thread = threading.Thread(target=self._scan_loop, daemon=True)
         self.scan_thread.start()
 
@@ -268,6 +292,360 @@ class TradingTelegramBot:
         self.is_running = False
         self.is_paused = False
         await update.message.reply_text("🔴 Auto-Scan gestoppt.")
+
+    async def cmd_closeall(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Schliesst alle offenen Positionen und sperrt sie 15 Minuten."""
+        try:
+            from adaptive import AdaptiveLearner
+            from datetime import datetime, timedelta
+            broker = AlpacaBroker()
+            positions = broker.get_positions()
+
+            if not positions:
+                await update.message.reply_text("Keine offenen Positionen.")
+                return
+
+            sym_list = list(positions.keys())
+            await update.message.reply_text(f"Schliesse {len(positions)} Position(en): {', '.join(sym_list)}")
+
+            learner = AdaptiveLearner()
+
+            # Schritt 1: Alle offenen Orders canceln (verhindert 403 bei close)
+            try:
+                broker.api.cancel_all_orders()
+                import time as _t; _t.sleep(1)
+            except Exception as ce:
+                logger.warning(f"cancel_all_orders: {ce}")
+
+            # Schritt 2: Positionen einzeln schließen
+            closed = []
+            failed = []
+            for sym in sym_list:
+                order_id = broker.close_position(sym)
+                if order_id:
+                    closed.append(sym)
+                    learner.temp_blacklist(sym, minutes=15)
+                else:
+                    failed.append(sym)
+
+            unblock_time = (datetime.now() + timedelta(minutes=15)).strftime("%H:%M")
+            text = ""
+            if closed:
+                text += f"✅ Geschlossen: {', '.join(closed)}\n"
+                text += f"🔒 Gesperrt bis {unblock_time} (15 Min)"
+            if failed:
+                text += f"\n❌ Fehler: {', '.join(failed)}\n"
+                text += f"ℹ️ Manuell in Alpaca Dashboard schließen."
+
+            await update.message.reply_text(text.strip())
+        except Exception as e:
+            await update.message.reply_text(f"Error: {e}")
+
+    async def cmd_cancelbuy(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Cancelt alle offenen BUY-Orders (keine Positionen, nur pending orders)."""
+        try:
+            broker = AlpacaBroker()
+            orders = broker.api.list_orders(status="open")
+            buy_orders = [o for o in orders if o.side == "buy"]
+
+            if not buy_orders:
+                await update.message.reply_text("Keine offenen BUY-Orders vorhanden.")
+                return
+
+            cancelled = []
+            failed = []
+            for o in buy_orders:
+                try:
+                    broker.api.cancel_order(o.id)
+                    cancelled.append(f"{o.symbol} ({o.qty}x)")
+                except Exception as e:
+                    failed.append(f"{o.symbol}: {e}")
+
+            lines = [f"<b>🗑 BUY-Orders gecancelt</b>", "━━━━━━━━━━━━━━━━━━━━━━"]
+            if cancelled:
+                lines.append("✅ " + "\n✅ ".join(cancelled))
+            if failed:
+                lines.append("❌ " + "\n❌ ".join(failed))
+            lines.append(f"\nBot kann bei nächstem Scan neu setzen.")
+            await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+        except Exception as e:
+            await update.message.reply_text(f"Error: {e}")
+
+    async def cmd_erklaer(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Erklaert: letzter Trade, letzte 2 Versuche, aktuelles Regime + Grund."""
+        import json
+        import numpy as np
+        from pathlib import Path
+        from adaptive import TRADE_LOG_FILE, TradeRecord
+
+        await update.message.reply_text("Analysiere...")
+
+        # ── 1. LETZTER AUSGEFUEHRTER TRADE ──────────────────
+        try:
+            trade_history = []
+            if TRADE_LOG_FILE.exists():
+                with open(TRADE_LOG_FILE) as f:
+                    data = json.load(f)
+                trade_history = [TradeRecord.from_dict(d) for d in data]
+
+            if trade_history:
+                last = trade_history[-1]
+                entry_t = last.entry_time[:16].replace("T", " ") if last.entry_time else "?"
+                exit_t = last.exit_time[:16].replace("T", " ") if last.exit_time else "noch offen"
+                pnl_str = f"{last.pnl_pct:+.1%} (${last.pnl:+.2f})" if last.exit_price else "noch offen"
+
+                formula_lines = []
+                for name, score in (last.formula_scores or {}).items():
+                    icon = "✅" if score > 0.5 else "❌"
+                    formula_lines.append(f"  {icon} {name}: {score:.2f}")
+                formulas_text = "\n".join(formula_lines) or "  keine Daten"
+
+                msg1 = (
+                    f"<b>1. LETZTER TRADE</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"Symbol:    <b>{last.symbol}</b>\n"
+                    f"Einstieg:  ${last.entry_price:.2f} um {entry_t}\n"
+                    f"Regime:    {last.regime}\n"
+                    f"P/L:       {pnl_str}\n"
+                    f"Ausstieg:  {last.exit_reason or exit_t}\n"
+                    f"Sentiment: {last.sentiment_score:+.2f}\n"
+                    f"Filter:\n{formulas_text}"
+                )
+            else:
+                msg1 = "<b>1. LETZTER TRADE</b>\n━━━━━━━━━━━━━━━━━━━━━━\nNoch keine Trade-History."
+        except Exception as e:
+            msg1 = f"<b>1. LETZTER TRADE</b>\nFehler: {e}"
+
+        await update.message.reply_text(msg1, parse_mode="HTML")
+
+        # ── 2. LETZTE 2 GEMINI-ENTSCHEIDUNGEN (BUY + HOLD, egal) ────────────
+        try:
+            attempts = []
+            if self.engine and hasattr(self.engine, "scan_attempts"):
+                gemini_attempts = [a for a in self.engine.scan_attempts if a.get("gemini_used")]
+                attempts = gemini_attempts[-2:]
+
+            if attempts:
+                parts = ["<b>2. LETZTE 2 GEMINI-ENTSCHEIDUNGEN</b>\n━━━━━━━━━━━━━━━━━━━━━━"]
+                for i, a in enumerate(reversed(attempts), 1):
+                    ts = str(a.get("timestamp", "?"))[:16].replace("T", " ")
+                    sym = a.get("symbol", "?")
+                    decision = a.get("decision", "?")
+                    prob = a.get("probability_pct")
+                    reason = str(a.get("reason", "?"))[:150]
+                    regime = a.get("regime", "?")
+                    cascade = a.get("cascade_level", "?")
+                    risk_factors = a.get("risk_factors", [])
+                    price_val = a.get("price", 0)
+                    passed = a.get("passed", [])
+                    failed = a.get("failed", [])
+
+                    if "AUSGEFUEHRT" in decision:
+                        d_icon = "✅"
+                    elif "ABGELEHNT" in decision:
+                        d_icon = "🚫"
+                    else:
+                        d_icon = "⚠️"
+
+                    prob_text = f"{prob}%  |  " if prob is not None else ""
+                    rf_text = ", ".join(risk_factors) if risk_factors else "keine"
+
+                    parts.append(
+                        f"\n<b>#{i}: {sym}</b> @ ${price_val:.2f} — {ts}\n"
+                        f"{d_icon} {decision}\n"
+                        f"{prob_text}Kaskade: {cascade}/7  |  Regime: {regime}\n"
+                        f"Grund: <i>{reason}</i>\n"
+                        f"✅ {', '.join(passed) or 'keine'}\n"
+                        f"❌ {', '.join(failed) or 'keine'}\n"
+                        f"Risiko: {rf_text}"
+                    )
+                msg2 = "\n".join(parts)
+            else:
+                msg2 = "<b>2. LETZTE 2 GEMINI-ENTSCHEIDUNGEN</b>\n━━━━━━━━━━━━━━━━━━━━━━\nNoch keine Gemini-Entscheidungen (Bot muss laufen, mind. 4/7 Kaskade nötig)."
+        except Exception as e:
+            msg2 = f"<b>2. LETZTE 2 SCAN-VERSUCHE</b>\nFehler: {e}"
+
+        await update.message.reply_text(msg2, parse_mode="HTML")
+
+        # ── 3. AKTUELLES REGIME + BEGRUENDUNG ───────────────
+        try:
+            broker = AlpacaBroker()
+            bars = broker.get_bars("SPY", timeframe="5Min", limit=50)
+            risk = RiskManager()
+            risk.update_regime(bars, force=True)
+
+            regime_icons = {"CALM": "😎", "NORMAL": "📊", "VOLATILE": "⚡", "CRISIS": "🚨"}
+            icon = regime_icons.get(risk.regime.value, "📊")
+
+            spy_close = bars["close"]
+            returns = spy_close.pct_change().dropna()
+            realized_vol = float(returns.tail(20).std() * np.sqrt(252))
+            recent_high = float(spy_close.tail(20).max())
+            current = float(spy_close.iloc[-1])
+            drawdown = (current - recent_high) / recent_high
+            p = risk.params
+
+            msg3 = (
+                f"<b>3. MARKT-REGIME: {icon} {risk.regime.value}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"{p['description']}\n\n"
+                f"<b>Warum {risk.regime.value}?</b>\n"
+                f"SPY Volatilitaet (20 Bars): <b>{realized_vol:.1%}</b>\n"
+                f"Drawdown vom Hoch:          <b>{drawdown:+.1%}</b>\n\n"
+                f"<b>Konsequenzen:</b>\n"
+                f"Max Positionen: {p['max_open_positions']}\n"
+                f"Max Groesse:    {p['max_position_pct']:.0%} des Depots\n"
+                f"Stop-Loss:      {p['stop_loss_atr_mult']}x ATR\n"
+                f"Take-Profit:    {p['take_profit_atr_mult']}x ATR\n"
+                f"Kelly-Faktor:   {p['kelly_mult']}"
+            )
+        except Exception as e:
+            msg3 = f"<b>3. MARKT-REGIME</b>\nFehler: {e}"
+
+        await update.message.reply_text(msg3, parse_mode="HTML")
+
+    async def cmd_stoplosses(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Zeigt aktive Positionen mit Stop-Loss und Take-Profit Levels."""
+        try:
+            from risk_manager import RiskManager, compute_atr
+            broker = AlpacaBroker()
+            positions = broker.get_positions()
+
+            if not positions:
+                await update.message.reply_text("Keine offenen Positionen.")
+                return
+
+            risk = RiskManager()
+            lines = ["<b>📊 Aktive Positionen + Stop-Loss</b>", "━━━━━━━━━━━━━━━━━━━━━━"]
+
+            for symbol, pos in positions.items():
+                try:
+                    from config import Config
+                    bars = broker.get_bars(symbol, timeframe=Config.TRADING_TIMEFRAME, limit=50)
+                    atr = compute_atr(bars) if not bars.empty else 0.0
+                    entry = pos["avg_entry"]
+                    current = pos["unrealized_plpc"]
+                    stops = risk.compute_stops(entry, atr)
+
+                    plpc = pos["unrealized_plpc"]
+                    pl_icon = "🟢" if plpc >= 0 else "🔴"
+
+                    lines.append(
+                        f"{pl_icon} <b>{symbol}</b>  {plpc:+.1%}\n"
+                        f"  Einstieg: ${entry:.2f}\n"
+                        f"  Stop Loss: ${stops['stop_loss']:.2f} ({stops['stop_loss_pct']})\n"
+                        f"  Take Profit: ${stops['take_profit']:.2f} ({stops['take_profit_pct']})\n"
+                        f"  R/R: {stops['risk_reward']}x | ATR: {stops['atr']:.4f}"
+                    )
+                except Exception as e:
+                    lines.append(f"⬜ <b>{symbol}</b>: {e}")
+
+            lines.append(f"━━━━━━━━━━━━━━━━━━━━━━\nRegime: {risk.regime.value}")
+            await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+        except Exception as e:
+            await update.message.reply_text(f"Error: {e}")
+
+    async def cmd_orders(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Zeigt alle offenen Orders (noch nicht gefüllt)."""
+        try:
+            broker = AlpacaBroker()
+            orders = broker.api.list_orders(status="open")
+            if not orders:
+                await update.message.reply_text("Keine offenen Orders.")
+                return
+            lines = ["<b>📋 Offene Orders</b>", "━━━━━━━━━━━━━━━━━━━━━━"]
+            for o in orders:
+                side_icon = "🟢" if o.side == "buy" else "🔴"
+                qty = o.qty or "?"
+                limit_price = f"@ ${float(o.limit_price):.2f}" if o.limit_price else "(market)"
+                lines.append(
+                    f"{side_icon} <b>{o.symbol}</b> {o.side.upper()} {qty}x {limit_price}\n"
+                    f"  Typ: {o.order_type} | Status: {o.status}\n"
+                    f"  ID: <code>{o.id}</code>"
+                )
+            await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+        except Exception as e:
+            await update.message.reply_text(f"Error: {e}")
+
+    async def cmd_queue(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Zeigt die Kandidaten-Queue (Signale die auf Cash warten)."""
+        try:
+            engine = self.engine
+            with engine._candidate_lock:
+                candidates = list(engine._candidate_queue)
+            if not candidates:
+                await update.message.reply_text("Keine Kandidaten in der Queue.")
+                return
+            candidates_sorted = sorted(candidates, key=lambda c: c["cascade_level"], reverse=True)
+            lines = [f"<b>💾 Kandidaten-Queue ({len(candidates)}/{engine._MAX_CANDIDATES})</b>",
+                     "━━━━━━━━━━━━━━━━━━━━━━",
+                     "<i>Werden gekauft sobald Cash frei wird</i>"]
+            for c in candidates_sorted:
+                age_min = int((c["ts"] - c["ts"].replace(hour=0, minute=0, second=0, microsecond=0)).total_seconds() / 60) if hasattr(c["ts"], "replace") else 0
+                from datetime import datetime
+                age_min = int((datetime.now() - c["ts"]).total_seconds() / 60)
+                lines.append(
+                    f"⭐ <b>{c['symbol']}</b> — {c['signal'].cascade_label}\n"
+                    f"  Preis: ${c['price']:.2f} | Qty: {c['signal'].qty} | vor {age_min}min"
+                )
+            await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+        except Exception as e:
+            await update.message.reply_text(f"Error: {e}")
+
+    async def cmd_test(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Schickt ein Symbol einmal durch alle 7 Layer und gibt das Ergebnis detailliert zurueck."""
+        if not context.args:
+            await update.message.reply_text("Usage: /test SYMBOL  (z.B. /test DVLT)")
+            return
+
+        symbol = context.args[0].upper()
+        await update.message.reply_text(f"🔬 Teste <b>{symbol}</b> durch alle 7 Layer...", parse_mode="HTML")
+
+        try:
+            from engine import Engine
+            engine = Engine()
+            signal = engine.analyze_symbol(symbol)
+
+            # Header
+            icon = "🟢" if signal.all_passed else "🔴"
+            lines = [
+                f"{icon} <b>TEST: {symbol}</b>",
+                f"Timeframe: {__import__('config').Config.TRADING_TIMEFRAME} | Bars: {__import__('config').Config.LOOKBACK_BARS}",
+                "━━━━━━━━━━━━━━━━━━━━━━",
+            ]
+
+            # Layer-Ergebnisse
+            layer_names = ["Momentum", "Kelly", "EV-Gap", "KL-Divergence", "Bayesian", "Stoikov", "Sentiment"]
+            for name in layer_names:
+                r = signal.results.get(name)
+                if r is None:
+                    lines.append(f"⬜ {name:<14} — kein Ergebnis")
+                    continue
+                s = "✅" if r["passed"] else "❌"
+                sig_val = r.get("signal", 0)
+                lines.append(f"{s} <b>{name:<14}</b> signal={sig_val:+.4f}")
+
+                # Details wenn vorhanden
+                details = r.get("details", {})
+                if isinstance(details, dict):
+                    for k, v in list(details.items())[:2]:
+                        if not isinstance(v, (dict, list)):
+                            lines.append(f"   └ {k}: {v}")
+
+            lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+
+            # Zusammenfassung
+            passed_count = sum(1 for r in signal.results.values() if r.get("passed"))
+            total = len(signal.results)
+            lines.append(f"Passed: <b>{passed_count}/{total}</b>")
+            lines.append(f"Action: <b>{signal.action}</b>")
+            lines.append(f"Reason: {signal.reason}")
+
+            await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+        except Exception as e:
+            await update.message.reply_text(f"Test error: {e}")
 
     async def cmd_regime(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Zeigt aktuelles Markt-Regime und Risk-Parameter."""
@@ -398,6 +776,7 @@ Antworte NUR mit JSON:
                     response_mime_type="application/json",
                     temperature=0.3,
                     max_output_tokens=500,
+                    thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
                 ),
             )
             text = response.text or ""
@@ -516,20 +895,6 @@ Antworte NUR mit JSON:
                 # scan_once übernimmt: exit_checks, watchlist, spike-merge, execute
                 spike_results = self.engine.scan_once(market_status)
 
-                # Trade-Alerts aus Engine trade_log (neue seit letztem Scan)
-                # (Engine sendet keine Telegram-Messages direkt, das macht der Loop hier)
-                for signal in self.engine.trade_log[-5:]:
-                    if signal.all_passed and signal.qty > 0:
-                        # Nur neue (letzten 5 Sekunden) alertieren
-                        age = (datetime.now() - signal.timestamp).total_seconds()
-                        if age < Config.SCAN_INTERVAL + 10:
-                            self.send_sync(
-                                f"🚨 <b>TRADE SIGNAL</b>\n\n"
-                                f"<b>BUY {signal.qty}x {signal.symbol}</b>\n"
-                                f"Kaskade: {signal.cascade_label}\n\n"
-                                f"{self._format_signal_text(signal)}"
-                            )
-
                 # Stop-Loss Nähe Warnung
                 positions = broker.get_positions()
                 for sym, pos in positions.items():
@@ -601,6 +966,13 @@ Antworte NUR mit JSON:
         self.app.add_handler(CommandHandler("weights", self.cmd_weights))
         self.app.add_handler(CommandHandler("sentiment", self.cmd_sentiment))
         self.app.add_handler(CommandHandler("screener", self.cmd_screener))
+        self.app.add_handler(CommandHandler("closeall", self.cmd_closeall))
+        self.app.add_handler(CommandHandler("erklaer", self.cmd_erklaer))
+        self.app.add_handler(CommandHandler("test", self.cmd_test))
+        self.app.add_handler(CommandHandler("stoplosses", self.cmd_stoplosses))
+        self.app.add_handler(CommandHandler("orders", self.cmd_orders))
+        self.app.add_handler(CommandHandler("cancelbuy", self.cmd_cancelbuy))
+        self.app.add_handler(CommandHandler("queue", self.cmd_queue))
 
         logger.info("Telegram bot running. Send /start to begin.")
         self.app.run_polling(drop_pending_updates=True)
