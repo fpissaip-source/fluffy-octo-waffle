@@ -377,6 +377,33 @@ class AlpacaBroker:
                 logger.error(f"Close failed {symbol}: {e}")
             return None
 
+    def place_native_stop(self, symbol: str, qty: int, stop_price: float) -> Optional[str]:
+        """Platziert eine native GTC Stop-Market-Order bei Alpaca.
+        Wird automatisch ausgeführt wenn der Preis fällt — auch wenn der Bot offline ist."""
+        try:
+            order = self.api.submit_order(
+                symbol=symbol,
+                qty=qty,
+                side="sell",
+                type="stop",
+                time_in_force="gtc",
+                stop_price=round(stop_price, 2),
+            )
+            logger.info(f"NATIVE STOP {symbol} {qty}x @ ${stop_price:.2f} -> Order {order.id}")
+            return order.id
+        except Exception as e:
+            logger.error(f"Native stop failed {symbol}: {e}")
+            return None
+
+    def cancel_order(self, order_id: str) -> bool:
+        """Storniert eine spezifische Order per ID."""
+        try:
+            self.api.cancel_order(order_id)
+            return True
+        except Exception as e:
+            logger.warning(f"Cancel order {order_id}: {e}")
+            return False
+
     def _get_position_qty(self, symbol: str) -> Optional[int]:
         """Gibt die aktuelle Qty einer Position zurück."""
         try:

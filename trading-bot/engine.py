@@ -742,6 +742,7 @@ class TradeSignal:
         self.reason: str = ""
         self.cascade_level: int = 0
         self.cascade_label: str = ""
+        self.atr: float = 0.0
 
     def add_result(self, result: dict):
         self.results[result["name"]] = result
@@ -849,6 +850,8 @@ class Engine:
         # Duplikat-Schutz fuer SIGNAL-Telegram-Notifications (verhindert Spam bei Order-Fehlern)
         self._signal_notified: dict[str, float] = {}  # symbol -> timestamp der letzten Notification
         self._SIGNAL_COOLDOWN = 300  # 5 Minuten Cooldown pro Symbol
+        # Native Stop-Loss Orders: symbol -> order_id (bei Alpaca hinterlegt)
+        self._native_stop_orders: dict[str, str] = {}
         # Telegram-Callback (optional): wird von TradingTelegramBot gesetzt
         self.notify: Optional[callable] = None
 
@@ -860,6 +863,16 @@ class Engine:
             except Exception as e:
                 logger.warning(f"Telegram notify failed: {e}")
 
+    def _cancel_native_stop(self, symbol: str):
+        """Storniert den nativen Alpaca Stop-Loss für ein Symbol (vor manuellem Close)."""
+        order_id = self._native_stop_orders.pop(symbol, None)
+        if order_id:
+            cancelled = self.broker.cancel_order(order_id)
+            if cancelled:
+                logger.info(f"[NATIVE STOP] {symbol}: Stop-Order {order_id} storniert")
+            else:
+                logger.warning(f"[NATIVE STOP] {symbol}: Stop-Order {order_id} konnte nicht storniert werden (bereits gefüllt?)")
+
     def _close_with_protection(self, symbol: str) -> bool:
         """Close mit Doppel-Close Schutz. Gibt True zurueck wenn Order abgesetzt."""
         with self._order_lock:
@@ -867,6 +880,7 @@ class Engine:
                 return False
             self._closing_positions.add(symbol)
             self._close_order_ts[symbol] = time.time()
+        self._cancel_native_stop(symbol)
         self.broker.close_position(symbol)
         self.position_highs.pop(symbol, None)
         return True
@@ -1157,6 +1171,7 @@ class Engine:
                     )
                     if self.broker.has_position(signal.symbol):
                         exit_price = self.broker.get_latest_price(signal.symbol) or entry_price
+                        self._cancel_native_stop(signal.symbol)
                         self.broker.close_position(signal.symbol)
                         self.position_highs.pop(signal.symbol, None)
                         self.learner.record_exit(
@@ -1292,6 +1307,12 @@ class Engine:
             price = bars["close"].iloc[-1]
             if price > 0:
                 signal.qty = max(1, int(bet_size / price))
+
+        # ── ATR fuer native Stop-Platzierung speichern ──
+        try:
+            signal.atr = compute_atr(bars)
+        except Exception:
+            signal.atr = 0.0
 
         # ── Scan-Versuch loggen (auch Perception-Layer-Ablehnungen) ──
         if not signal.all_passed:
@@ -1536,6 +1557,23 @@ class Engine:
             self._log_scan_attempt(signal, price, reasoning, executed=True)
             # Cooldown nach erfolgreicher Order zurücksetzen (nächster Trade soll wieder notifiziert werden)
             self._signal_notified.pop(signal.symbol, None)
+
+            # ── Nativer Broker Stop-Loss (sofortige Ausführung bei Alpaca, auch offline) ──
+            if signal.atr > 0:
+                stops = self.risk.compute_stops(price, signal.atr)
+                stop_price = stops["stop_loss"]
+                stop_order_id = self.broker.place_native_stop(signal.symbol, signal.qty, stop_price)
+                if stop_order_id:
+                    self._native_stop_orders[signal.symbol] = stop_order_id
+                    logger.info(
+                        f"[NATIVE STOP] {signal.symbol}: Stop @ ${stop_price:.2f} "
+                        f"({stops['stop_loss_pct']}) hinterlegt"
+                    )
+                    self._tg(
+                        f"🛡 <b>Stop-Loss hinterlegt</b> — {signal.symbol}\n"
+                        f"Stop: ${stop_price:.2f} ({stops['stop_loss_pct']})\n"
+                        f"<i>Wird direkt von Alpaca ausgeführt (auch wenn Bot offline)</i>"
+                    )
 
             # ── ORDER PLACED Telegram Alert ──
             order_type = "LIMIT" if (signal.results.get("Stoikov", {}).get("passed") and
