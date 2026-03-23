@@ -861,6 +861,8 @@ class Engine:
         # Exit-Notification Deduplication: verhindert mehrfache Telegram-Exits
         self._exit_notified: dict[str, float] = {}  # symbol -> timestamp
         self._EXIT_NOTIFY_COOLDOWN = 120  # 2 Minuten Cooldown pro Symbol
+        # Throttle für "Keine Bars"-Warnung (1x pro 5 Minuten pro Symbol)
+        self._no_bars_warned: dict[str, float] = {}
         # Telegram-Callback (optional): wird von TradingTelegramBot gesetzt
         self.notify: Optional[callable] = None
 
@@ -1753,7 +1755,10 @@ class Engine:
                 entry_price = pos["avg_entry"]
                 if bars.empty:
                     atr = entry_price * 0.01
-                    logger.warning(f"[EXIT] {symbol}: Keine Bars — ATR-Fallback {atr:.4f}")
+                    now_ts = time.time()
+                    if now_ts - self._no_bars_warned.get(symbol, 0) >= 300:
+                        self._no_bars_warned[symbol] = now_ts
+                        logger.warning(f"[EXIT] {symbol}: Keine Bars — ATR-Fallback {atr:.4f}")
                 else:
                     atr = compute_atr(bars)
 
