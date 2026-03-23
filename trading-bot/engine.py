@@ -858,6 +858,8 @@ class Engine:
         self._native_stop_orders: dict[str, str] = {}
         # Native Take-Profit Orders: symbol -> order_id (bei Alpaca hinterlegt)
         self._native_tp_orders: dict[str, str] = {}
+        # Aktive Stop/TP-Level pro Position (für Dashboard)
+        self._position_levels: dict[str, dict] = {}
         # Exit-Notification Deduplication: verhindert mehrfache Telegram-Exits
         self._exit_notified: dict[str, float] = {}  # symbol -> timestamp
         self._EXIT_NOTIFY_COOLDOWN = 120  # 2 Minuten Cooldown pro Symbol
@@ -893,6 +895,7 @@ class Engine:
                 logger.info(f"[NATIVE TP] {symbol}: TP-Order {order_id} storniert")
             else:
                 logger.warning(f"[NATIVE TP] {symbol}: TP-Order {order_id} konnte nicht storniert werden (bereits gefüllt?)")
+        self._position_levels.pop(symbol, None)
 
     def _close_with_protection(self, symbol: str) -> bool:
         """Close mit Doppel-Close Schutz. Gibt True zurueck wenn Order abgesetzt."""
@@ -1634,6 +1637,16 @@ class Engine:
                         f"TP:   ${tp_price:.2f} ({stops['take_profit_pct']})  |  R/R: {stops['risk_reward']}x\n"
                         f"<i>Werden direkt von Alpaca ausgeführt (auch wenn Bot offline)</i>"
                     )
+
+                # Level für Dashboard speichern
+                self._position_levels[signal.symbol] = {
+                    "stop": stop_price,
+                    "tp": tp_price,
+                    "rr": stops["risk_reward"],
+                    "sl_pct": stops["stop_loss_pct"],
+                    "tp_pct": stops["take_profit_pct"],
+                    "regime": self.risk.regime.value,
+                }
 
             # ── ORDER PLACED Telegram Alert ──
             order_type = "LIMIT" if (signal.results.get("Stoikov", {}).get("passed") and

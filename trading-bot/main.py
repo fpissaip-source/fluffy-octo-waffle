@@ -138,6 +138,7 @@ def main():
         cmd_backtest()
     else:
         import threading
+        import dashboard as _dashboard
         from dashboard import start_background as start_dashboard
 
         telegram_configured = (
@@ -158,6 +159,7 @@ def main():
             def _engine_thread():
                 try:
                     eng = Engine()
+                    _dashboard.set_engine(eng)
                     start_dashboard(port=int(os.getenv("BOT_API_PORT", "5001")))
                     eng.notify = bot.send_sync
                     bot.engine = eng
@@ -177,6 +179,7 @@ def main():
             sys.exit(1)
         else:
             engine = Engine()
+            _dashboard.set_engine(engine)
             start_dashboard(port=int(os.getenv("BOT_API_PORT", "5001")))
             engine.run()
 

@@ -24,6 +24,13 @@ from threading import Thread
 
 logger = logging.getLogger("bot.dashboard")
 
+# ── Engine-Referenz (wird nach Engine-Start gesetzt) ──
+_engine = None
+
+def set_engine(engine) -> None:
+    global _engine
+    _engine = engine
+
 # ── Live-Log Ring-Buffer (letzte 200 Zeilen) ──
 _LOG_BUFFER: collections.deque = collections.deque(maxlen=200)
 
@@ -132,6 +139,41 @@ def get_dashboard_data() -> dict:
     return data
 
 
+def get_decisions_data() -> dict:
+    """Liefert Scan-Entscheidungen und aktive TP/SL-Level für das Dashboard."""
+    result: dict = {
+        "position_levels": {},
+        "decisions": [],
+        "exit_reasons": [],
+    }
+
+    if _engine is not None:
+        result["position_levels"] = dict(_engine._position_levels)
+
+        # Scan-Versuche (neuste zuerst)
+        result["decisions"] = list(reversed(_engine.scan_attempts[-50:]))
+
+        # Exit-Gründe aus Trade-Historie
+        try:
+            history = []
+            for t in reversed(_engine.learner.trade_history[-30:]):
+                if t.exit_price is not None:
+                    history.append({
+                        "symbol": t.symbol,
+                        "entry": round(t.entry_price, 4),
+                        "exit": round(t.exit_price, 4),
+                        "pnl_pct": round(t.pnl_pct * 100, 2),
+                        "exit_reason": t.exit_reason or "—",
+                        "ts": t.exit_time or t.entry_time or "—",
+                        "regime": t.regime,
+                    })
+            result["exit_reasons"] = history
+        except Exception:
+            pass
+
+    return result
+
+
 # ═══════════════════════════════════════════════════════════════════
 #  HTML DASHBOARD
 # ═══════════════════════════════════════════════════════════════════
@@ -149,6 +191,13 @@ h1{color:#00ff88;font-size:1.4em;margin-bottom:18px;display:flex;align-items:cen
 h2{color:#00aaff;font-size:0.78em;margin:20px 0 8px;text-transform:uppercase;letter-spacing:2px}
 .dot{width:9px;height:9px;border-radius:50%;background:#00ff88;animation:pulse 2s infinite;flex-shrink:0}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+/* Tabs */
+.tab-nav{display:flex;gap:6px;margin-bottom:20px;border-bottom:1px solid #1a1a1a;padding-bottom:0}
+.tab-btn{background:none;border:none;border-bottom:2px solid transparent;color:#555;font-family:'Courier New',monospace;font-size:.8em;padding:8px 16px;cursor:pointer;letter-spacing:1px;text-transform:uppercase;transition:color .15s}
+.tab-btn:hover{color:#aaa}
+.tab-btn.active{color:#00aaff;border-bottom-color:#00aaff}
+.tab-content{display:none}
+.tab-content.active{display:block}
 /* Status bar */
 .statusbar{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:18px}
 .api-badge{display:flex;align-items:center;gap:6px;background:#111;border:1px solid #1e1e1e;border-radius:6px;padding:7px 12px;font-size:.75em}
@@ -175,6 +224,33 @@ tr:hover td{background:#0f0f0f}
 .badge-live{background:#2a0a0a;color:#ff4444;border:1px solid #ff444430}
 .badge-regime{background:#0a1a2a;color:#00aaff;border:1px solid #00aaff30}
 .badge-dryrun{background:#2a1a00;color:#ffaa00;border:1px solid #ffaa0040}
+/* Decision cards */
+.dec-card{background:#0d0d0d;border:1px solid #1a1a1a;border-radius:8px;padding:12px 14px;margin-bottom:10px}
+.dec-card.executed{border-left:3px solid #00ff88}
+.dec-card.rejected{border-left:3px solid #ff4444}
+.dec-card.fallback{border-left:3px solid #ffaa00}
+.dec-header{display:flex;align-items:center;gap:10px;margin-bottom:6px;flex-wrap:wrap}
+.dec-sym{color:#fff;font-weight:bold;font-size:1em}
+.dec-price{color:#555;font-size:.75em}
+.dec-time{color:#333;font-size:.7em;margin-left:auto}
+.dec-reason{color:#888;font-size:.78em;line-height:1.5em;margin:6px 0 4px}
+.dec-filters{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
+.filt{display:inline-block;padding:1px 6px;border-radius:3px;font-size:.65em}
+.filt-ok{background:#0a1a0a;color:#00cc66;border:1px solid #00cc6630}
+.filt-fail{background:#1a0a0a;color:#cc4444;border:1px solid #cc444430}
+.filt-risk{background:#1a1000;color:#cc8800;border:1px solid #cc880030}
+.dec-prob{color:#00aaff;font-size:.8em;font-weight:bold}
+.badge-ex{background:#0a2a0a;color:#00ff88;border:1px solid #00ff8830;padding:1px 8px;border-radius:4px;font-size:.68em;font-weight:bold}
+.badge-rej{background:#2a0a0a;color:#ff4444;border:1px solid #ff444430;padding:1px 8px;border-radius:4px;font-size:.68em;font-weight:bold}
+.badge-fb{background:#2a1a00;color:#ffaa00;border:1px solid #ffaa0040;padding:1px 8px;border-radius:4px;font-size:.68em;font-weight:bold}
+/* TP/SL level bars */
+.level-row{display:flex;align-items:center;gap:10px;padding:8px 12px;background:#0d0d0d;border:1px solid #1a1a1a;border-radius:6px;margin-bottom:8px;flex-wrap:wrap}
+.level-sym{color:#fff;font-weight:bold;min-width:80px}
+.level-entry{color:#555;font-size:.75em}
+.level-sl{color:#ff4444;font-size:.85em;font-weight:bold}
+.level-tp{color:#00ff88;font-size:.85em;font-weight:bold}
+.level-rr{color:#00aaff;font-size:.78em}
+.level-regime{color:#555;font-size:.72em;margin-left:auto}
 /* Live Log */
 #log-box{background:#060606;border:1px solid #1a1a1a;border-radius:8px;padding:10px 14px;height:220px;overflow-y:auto;font-size:.72em;line-height:1.6em}
 .log-INFO{color:#555}.log-WARNING{color:#ffaa00}.log-ERROR{color:#ff4444}.log-DEBUG{color:#333}
@@ -201,6 +277,15 @@ tr:hover td{background:#0f0f0f}
   <span class="badge badge-regime" id="regime-badge" style="display:none">—</span>
   <span class="badge badge-dryrun" id="dryrun-badge" style="display:none">DRY RUN</span>
 </h1>
+
+<!-- Tab Navigation -->
+<div class="tab-nav">
+  <button class="tab-btn active" onclick="switchTab('overview', this)">Übersicht</button>
+  <button class="tab-btn" onclick="switchTab('decisions', this)">Entscheidungen & TP/SL</button>
+</div>
+
+<!-- ════ TAB: ÜBERSICHT ════ -->
+<div id="tab-overview" class="tab-content active">
 
 <!-- API Status -->
 <div class="statusbar" id="api-status">
@@ -260,12 +345,43 @@ tr:hover td{background:#0f0f0f}
 <h2>Live Log</h2>
 <div id="log-box"><span style="color:#333">Lade...</span></div>
 
+</div><!-- end tab-overview -->
+
+<!-- ════ TAB: ENTSCHEIDUNGEN & TP/SL ════ -->
+<div id="tab-decisions" class="tab-content">
+
+<h2>Aktive Stop-Loss &amp; Take-Profit Level</h2>
+<div id="levels-container"><div class="no-data">Lade...</div></div>
+
+<h2>Kauf-Entscheidungen (letzte 50 Scans)</h2>
+<div id="decisions-container"><div class="no-data">Lade...</div></div>
+
+<h2>Verkauf-Gründe (abgeschlossene Trades)</h2>
+<div class="tscroll">
+<table id="exit-table">
+  <thead><tr><th>Symbol</th><th>Einstieg</th><th>Ausstieg</th><th>P&amp;L %</th><th>Grund</th><th>Zeit</th></tr></thead>
+  <tbody id="exit-body"><tr><td colspan="6" class="no-data">Lade...</td></tr></tbody>
+</table>
+</div>
+
+</div><!-- end tab-decisions -->
+
 <div class="footer" id="footer">Auto-Refresh alle 15s</div>
 
 <script>
 const fmt = n => (n == null ? '—' : n.toLocaleString('de-DE', {minimumFractionDigits:2, maximumFractionDigits:2}));
 const fmtPct = n => (n == null ? '—' : (n >= 0 ? '+' : '') + n.toFixed(2) + '%');
 const cls = n => n >= 0 ? 'green' : 'red';
+
+let _activeTab = 'overview';
+function switchTab(name, btn) {
+  _activeTab = name;
+  document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  btn.classList.add('active');
+  if (name === 'decisions') refreshDecisions();
+}
 
 async function refresh() {
   let d;
@@ -416,10 +532,93 @@ function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
+async function refreshDecisions() {
+  let d;
+  try {
+    d = await (await fetch('/api/decisions')).json();
+  } catch(e) { return; }
+
+  // ── Aktive TP/SL Level ──
+  const levels = d.position_levels || {};
+  const levKeys = Object.keys(levels);
+  const levEl = document.getElementById('levels-container');
+  if (!levKeys.length) {
+    levEl.innerHTML = '<div class="no-data">Keine aktiven Stop/TP-Level (nur für Aktien, nicht Crypto)</div>';
+  } else {
+    levEl.innerHTML = levKeys.map(sym => {
+      const l = levels[sym];
+      return `<div class="level-row">
+        <span class="level-sym">${sym}</span>
+        <span class="level-sl">SL: $${l.stop != null ? l.stop.toFixed(2) : '—'} <span style="color:#773333">(${l.sl_pct || ''})</span></span>
+        <span class="level-tp">TP: $${l.tp != null ? l.tp.toFixed(2) : '—'} <span style="color:#337733">(${l.tp_pct || ''})</span></span>
+        <span class="level-rr">R/R: ${l.rr != null ? l.rr + 'x' : '—'}</span>
+        <span class="level-regime">${l.regime || ''}</span>
+      </div>`;
+    }).join('');
+  }
+
+  // ── Kauf-Entscheidungen ──
+  const decs = d.decisions || [];
+  const decEl = document.getElementById('decisions-container');
+  if (!decs.length) {
+    decEl.innerHTML = '<div class="no-data">Noch keine Scan-Ergebnisse (Engine läuft?)</div>';
+  } else {
+    decEl.innerHTML = decs.map(dec => {
+      const decClass = dec.decision === 'AUSGEFUEHRT' ? 'executed' : dec.decision && dec.decision.includes('FALLBACK') ? 'fallback' : 'rejected';
+      const badge = dec.decision === 'AUSGEFUEHRT'
+        ? '<span class="badge-ex">GEKAUFT</span>'
+        : dec.decision && dec.decision.includes('FALLBACK')
+          ? '<span class="badge-fb">FALLBACK</span>'
+          : '<span class="badge-rej">ABGELEHNT</span>';
+      const probStr = dec.probability_pct != null ? `<span class="dec-prob">${dec.probability_pct}%</span>` : '';
+      const passed = (dec.passed || []).map(f => `<span class="filt filt-ok">${escHtml(f)}</span>`).join('');
+      const failed = (dec.failed || []).map(f => `<span class="filt filt-fail">${escHtml(f)}</span>`).join('');
+      const risks = (dec.risk_factors || []).map(r => `<span class="filt filt-risk">${escHtml(r)}</span>`).join('');
+      const ts = dec.timestamp ? dec.timestamp.substring(0,19).replace('T',' ') : '';
+      const reason = dec.reason ? `<div class="dec-reason">${escHtml(dec.reason)}</div>` : '';
+      const riskSection = risks ? `<div class="dec-filters" style="margin-top:3px">${risks}</div>` : '';
+      return `<div class="dec-card ${decClass}">
+        <div class="dec-header">
+          ${badge}
+          <span class="dec-sym">${escHtml(dec.symbol || '—')}</span>
+          <span class="dec-price">@ $${dec.price != null ? dec.price.toFixed(2) : '—'}</span>
+          <span style="color:#555;font-size:.72em">${escHtml(dec.cascade_label || '')}</span>
+          ${probStr}
+          <span class="dec-time">${ts}</span>
+        </div>
+        ${reason}
+        <div class="dec-filters">${passed}${failed}</div>
+        ${riskSection}
+      </div>`;
+    }).join('');
+  }
+
+  // ── Verkauf-Gründe ──
+  const exits = d.exit_reasons || [];
+  const exitBody = document.getElementById('exit-body');
+  if (!exits.length) {
+    exitBody.innerHTML = '<tr><td colspan="6" class="no-data">Noch keine abgeschlossenen Trades</td></tr>';
+  } else {
+    exitBody.innerHTML = exits.map(t => {
+      const c = t.pnl_pct >= 0 ? 'green' : 'red';
+      const ts = t.ts ? String(t.ts).substring(0,19).replace('T',' ') : '—';
+      return `<tr>
+        <td><b>${escHtml(t.symbol)}</b></td>
+        <td>$${t.entry != null ? t.entry.toFixed(4) : '—'}</td>
+        <td>$${t.exit != null ? t.exit.toFixed(4) : '—'}</td>
+        <td class="${c}">${fmtPct(t.pnl_pct)}</td>
+        <td style="color:#888;font-size:.78em">${escHtml(t.exit_reason)}</td>
+        <td style="color:#444;font-size:.72em">${ts}</td>
+      </tr>`;
+    }).join('');
+  }
+}
+
 refresh();
 refreshLog();
 setInterval(refresh, 15000);
 setInterval(refreshLog, 3000);
+setInterval(() => { if (_activeTab === 'decisions') refreshDecisions(); }, 15000);
 </script>
 </body>
 </html>"""
@@ -427,7 +626,22 @@ setInterval(refreshLog, 3000);
 
 class DashboardHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path == "/api/log":
+        if self.path == "/api/decisions":
+            try:
+                data = get_decisions_data()
+                body = json.dumps(data, default=str).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as e:
+                body = json.dumps({"error": str(e)}).encode()
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(body)
+        elif self.path == "/api/log":
             body = json.dumps(list(_LOG_BUFFER)).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
