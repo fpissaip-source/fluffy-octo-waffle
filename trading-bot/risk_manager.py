@@ -231,9 +231,13 @@ class RiskManager:
 
     # ── Position Sizing ────────────────────────────────
 
+    def max_position_usd(self, equity: float) -> float:
+        """Maximales Kapital pro Position in USD (für Fractional Crypto)."""
+        return equity * self.params["max_position_pct"]
+
     def max_position_size(self, equity: float, price: float) -> int:
-        """Maximale Positionsgroesse basierend auf Regime."""
-        max_usd = equity * self.params["max_position_pct"]
+        """Maximale Positionsgroesse basierend auf Regime (ganze Aktien)."""
+        max_usd = self.max_position_usd(equity)
         if price <= 0:
             return 0
         return max(1, int(max_usd / price))

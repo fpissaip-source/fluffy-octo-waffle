@@ -268,7 +268,7 @@ class AlpacaBroker:
             logger.warning(f"Snapshot failed {symbol}: {e}")
             return None
 
-    def market_buy(self, symbol: str, qty: int) -> Optional[str]:
+    def market_buy(self, symbol: str, qty: float) -> Optional[str]:
         if Config.DRY_RUN:
             logger.info(f"[DRY RUN] WÜRDE KAUFEN: {qty}x {symbol} @ MARKET")
             return "dry-run-buy"
@@ -305,7 +305,7 @@ class AlpacaBroker:
             logger.error(f"Buy failed {symbol}: {e}")
             return None
 
-    def market_sell(self, symbol: str, qty: int) -> Optional[str]:
+    def market_sell(self, symbol: str, qty: float) -> Optional[str]:
         if Config.DRY_RUN:
             logger.info(f"[DRY RUN] WÜRDE VERKAUFEN: {qty}x {symbol} @ MARKET")
             return "dry-run-sell"
@@ -321,7 +321,7 @@ class AlpacaBroker:
             logger.error(f"Sell failed {symbol}: {e}")
             return None
 
-    def limit_buy(self, symbol: str, qty: int, limit_price: float) -> Optional[str]:
+    def limit_buy(self, symbol: str, qty: float, limit_price: float) -> Optional[str]:
         if Config.DRY_RUN:
             logger.info(f"[DRY RUN] WÜRDE KAUFEN: {qty}x {symbol} @ LIMIT ${limit_price:.2f}")
             return "dry-run-limit-buy"

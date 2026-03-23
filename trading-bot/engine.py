@@ -739,7 +739,7 @@ class TradeSignal:
         self.results: dict = {}
         self.all_passed = False
         self.action: Optional[str] = None
-        self.qty: int = 0
+        self.qty: float = 0.0  # float für Fractional Crypto
         self.reason: str = ""
         self.cascade_level: int = 0
         self.cascade_label: str = ""
@@ -1313,7 +1313,12 @@ class Engine:
             bet_size = signal.results["Kelly"]["details"].get("bet_size_usd", 0)
             price = bars["close"].iloc[-1]
             if price > 0:
-                signal.qty = max(1, int(bet_size / price))
+                from broker import CRYPTO_SYMBOLS
+                if signal.symbol.upper() in CRYPTO_SYMBOLS:
+                    # Crypto: Fractional qty (6 Dezimalstellen, min $1 notional)
+                    signal.qty = round(bet_size / price, 6)
+                else:
+                    signal.qty = max(1, int(bet_size / price))
 
         # ── ATR fuer native Stop-Platzierung speichern ──
         try:
@@ -1430,15 +1435,25 @@ class Engine:
             return None
 
         # Cap qty by risk manager + Cash-Check
+        from broker import CRYPTO_SYMBOLS
         equity = self.broker.get_equity()
         price = self.broker.get_latest_price(signal.symbol) or 1
-        max_qty = self.risk.max_position_size(equity, price)
-        signal.qty = min(signal.qty, max_qty)
-        if signal.qty <= 0:
-            logger.warning(f"{signal.symbol}: qty=0 nach Risk-Sizing (equity={equity:.0f}, price={price:.2f}) — abgebrochen")
-            with self._order_lock:
-                self._pending_buys.discard(signal.symbol)
-            return None
+        is_crypto = signal.symbol.upper() in CRYPTO_SYMBOLS
+        if is_crypto:
+            # Fractional Crypto: cap in USD, mindestens $1 notional
+            max_usd = self.risk.max_position_usd(equity)
+            max_qty_crypto = round(max_usd / price, 6)
+            signal.qty = min(signal.qty, max_qty_crypto)
+            if signal.qty * price < 1.0:
+                signal.qty = round(1.0 / price, 6)  # mindestens $1
+        else:
+            max_qty = self.risk.max_position_size(equity, price)
+            signal.qty = min(signal.qty, max_qty)
+            if signal.qty <= 0:
+                logger.warning(f"{signal.symbol}: qty=0 nach Risk-Sizing (equity={equity:.0f}, price={price:.2f}) — abgebrochen")
+                with self._order_lock:
+                    self._pending_buys.discard(signal.symbol)
+                return None
 
         # Kein Cash → Kandidaten-Queue
         cash = self.broker.api.get_account().cash
@@ -1446,7 +1461,7 @@ class Engine:
             cash = float(cash)
         except Exception:
             cash = 0.0
-        min_order_value = price * 1  # mindestens 1 Aktie
+        min_order_value = price * signal.qty  # exakter Betrag der Order
         if cash < min_order_value:
             self._queue_candidate(signal, price)
             with self._order_lock:
