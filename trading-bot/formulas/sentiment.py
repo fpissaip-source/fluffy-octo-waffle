@@ -217,12 +217,10 @@ class GeminiAnalyzer:
     def analyze(self, articles: list[dict], symbol: str) -> Optional[dict]:
         """
         Fragt Gemini nach einer Einschaetzung.
-        Bekommt vollständige Artikel-Daten (Headline + Datum) für Trend-Erkennung.
+        Wenn Artikel vorhanden: Trend-Analyse über Headlines.
+        Ohne Artikel: Gemini bewertet das Symbol direkt aus eigenem Wissen.
         Gibt Score (-1 bis +1), Confidence und Begründung zurück.
         """
-        if not articles:
-            return None
-
         # Rate limiting
         now = time.time()
         if now - self.last_call < self.min_interval:
@@ -235,22 +233,31 @@ class GeminiAnalyzer:
 
             client = genai.Client(api_key=self.api_key)
 
-            # Top N Headlines mit Datum (für narrative Trends über mehrere Tage)
-            top_articles = articles[:Config.SENTIMENT_GEMINI_HEADLINES]
-            news_text = "\n".join(
-                f"- [{a.get('created_at', '')[:10]}] {a['headline']}"
-                for a in top_articles
-            )
-
-            prompt = (
-                f"You are analyzing multi-day news flow for {symbol} stock.\n"
-                f"News from the last {Config.NEWS_LOOKBACK_HOURS}h (newest first):\n\n"
-                f"{news_text}\n\n"
-                f"Identify the NARRATIVE TREND across all articles:\n"
-                f"- Is sentiment improving, worsening, or stable over time?\n"
-                f"- Are there fundamental catalysts (earnings, FDA, M&A, macro) that suggest a multi-day move?\n"
-                f"- Score: +1.0 = strong bullish catalyst, 0.0 = neutral, -1.0 = strong bearish catalyst"
-            )
+            if articles:
+                # Top N Headlines mit Datum (für narrative Trends über mehrere Tage)
+                top_articles = articles[:Config.SENTIMENT_GEMINI_HEADLINES]
+                news_text = "\n".join(
+                    f"- [{a.get('created_at', '')[:10]}] {a['headline']}"
+                    for a in top_articles
+                )
+                prompt = (
+                    f"You are analyzing multi-day news flow for {symbol} stock.\n"
+                    f"News from the last {Config.NEWS_LOOKBACK_HOURS}h (newest first):\n\n"
+                    f"{news_text}\n\n"
+                    f"Identify the NARRATIVE TREND across all articles:\n"
+                    f"- Is sentiment improving, worsening, or stable over time?\n"
+                    f"- Are there fundamental catalysts (earnings, FDA, M&A, macro) that suggest a multi-day move?\n"
+                    f"- Score: +1.0 = strong bullish catalyst, 0.0 = neutral, -1.0 = strong bearish catalyst"
+                )
+            else:
+                prompt = (
+                    f"You are a financial analyst. Assess the current market sentiment for {symbol} stock "
+                    f"based on your knowledge of recent news, sector trends, and macro environment.\n\n"
+                    f"- Is the overall sentiment for {symbol} currently bullish, neutral, or bearish?\n"
+                    f"- Consider: recent earnings, sector rotation, macro headwinds/tailwinds.\n"
+                    f"- Score: +1.0 = strong bullish, 0.0 = neutral, -1.0 = strong bearish\n"
+                    f"- Set confidence lower (0.3-0.5) since no live news data is available."
+                )
 
             # Structured Output — kein JSON-Parsing nötig
             response_schema = genai_types.Schema(
@@ -355,11 +362,9 @@ class SentimentEngine:
         macro_articles = self.news_fetcher.get_market_news(limit=15)
         macro_sentiment = self.scorer.score_articles(macro_articles, is_macro=True)
 
-        # ── 3. Gemini Trend-Analyse (Top 25 Headlines mit Datum) ──
-        # Läuft immer wenn Artikel vorhanden (nicht nur bei extremem Score)
-        gemini_result = None
-        if articles:
-            gemini_result = self.gemini.analyze(articles, symbol)
+        # ── 3. Gemini Trend-Analyse ──
+        # Läuft immer — mit Artikeln wenn vorhanden, sonst direkt mit Symbol-Name
+        gemini_result = self.gemini.analyze(articles, symbol)
 
         # ── Kombination ──
         # Gewichtung: Symbol-News 50%, Makro 30%, Gemini 20%
