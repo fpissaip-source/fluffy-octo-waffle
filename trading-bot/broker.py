@@ -275,8 +275,8 @@ class AlpacaBroker:
         try:
             status = self.get_market_status()
             is_crypto = symbol.upper() in CRYPTO_SYMBOLS
-            if status in ("extended", "overnight") and not is_crypto:
-                # Extended/Overnight hours: Limit-Order leicht über Marktpreis (0.1% Slippage)
+            if status == "extended" and not is_crypto:
+                # Extended hours: Limit-Order leicht über Marktpreis (0.1% Slippage)
                 price = self.get_latest_price(symbol)
                 if not price:
                     logger.warning(f"Buy skipped {symbol}: no price available")
@@ -288,7 +288,7 @@ class AlpacaBroker:
                     limit_price=limit_price,
                     extended_hours=True,
                 )
-                logger.info(f"BUY {qty}x {symbol} @ LIMIT ${limit_price:.2f} [{'EXT' if status == 'extended' else 'OVERNIGHT'}] -> Order {order.id}")
+                logger.info(f"BUY {qty}x {symbol} @ LIMIT ${limit_price:.2f} [EXT] -> Order {order.id}")
             elif is_crypto:
                 # Crypto: GTC (Alpaca unterstützt kein "day" für Crypto-Market-Orders)
                 order = self.api.submit_order(
@@ -329,7 +329,7 @@ class AlpacaBroker:
             status = self.get_market_status()
             is_crypto = symbol.upper() in CRYPTO_SYMBOLS
             extra_kwargs = {}
-            if status in ("extended", "overnight") and not is_crypto:
+            if status == "extended" and not is_crypto:
                 extra_kwargs["extended_hours"] = True
             order = self.api.submit_order(
                 symbol=symbol, qty=qty, side="buy",
@@ -357,8 +357,8 @@ class AlpacaBroker:
                     symbol=symbol, side="sell", type="market",
                     time_in_force="gtc", qty=self._get_position_qty(symbol),
                 )
-            elif market_status in ("extended", "overnight"):
-                # Extended/Overnight Hours: IMMER Limit-Order (Market-Orders funktionieren nicht!)
+            elif market_status == "extended":
+                # Extended Hours: IMMER Limit-Order (Market-Orders funktionieren nicht!)
                 qty = self._get_position_qty(symbol)
                 # Echtzeit-Preis als Basis (nicht Entry-Preis - der kann weit über Markt liegen!)
                 live = self.get_latest_price(symbol)
@@ -446,11 +446,10 @@ class AlpacaBroker:
         return self.api.get_clock().is_open
 
     def get_market_status(self) -> str:
-        """Returns 'open', 'extended', 'overnight', or 'closed'.
-        - open:      Reguläre Handelszeit 9:30–16:00 ET (Mo–Fr)
-        - extended:  Vor-/Nachbörse 4:00–9:30 ET und 16:00–20:00 ET (Mo–Fr)
-        - overnight: Nacht-Session 20:00–4:00 ET (Mo–Fr) — Aktien 24/5 + Crypto
-        - closed:    Wochenende (Sa/So) — nur Crypto
+        """Returns 'open', 'extended', or 'closed'.
+        - open:     Reguläre Handelszeit 9:30–16:00 ET (Mo–Fr)
+        - extended: Vor-/Nachbörse 4:00–9:30 ET und 16:00–20:00 ET (Mo–Fr)
+        - closed:   Nacht + Wochenende — nur Crypto (Aktien-Extended nicht verfügbar)
         """
         from datetime import timezone
         clock = self.api.get_clock()
@@ -473,7 +472,4 @@ class AlpacaBroker:
             # After-hours: 16:00–20:00 ET
             if 16.0 <= et_hour < 20.0:
                 return "extended"
-            # Overnight: 20:00–04:00 ET — Aktien 24/5 + Crypto
-            return "overnight"
-        # Wochenende: nur Crypto handelbar
         return "closed"

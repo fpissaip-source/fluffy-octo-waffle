@@ -555,9 +555,8 @@ class WatchlistDiscovery:
         candidates_str = ", ".join(candidates[:50])
         context_map = {
             "open": "US Aktienmarkt ist GERADE OFFEN (9:30–16:00 ET).",
-            "extended": "US Aktienmarkt ist in VOR-/NACHBÖRSENHANDEL.",
-            "overnight": "US Aktienmarkt ist in OVERNIGHT-SESSION (20:00–04:00 ET) — Aktien 24/5 und Crypto handelbar.",
-            "closed": "Wochenende — nur Crypto handelbar.",
+            "extended": "US Aktienmarkt ist in VOR-/NACHBÖRSENHANDEL (4:00–9:30 / 16:00–20:00 ET).",
+            "closed": "Markt geschlossen — nur Crypto handelbar.",
         }
         context = context_map.get(market_status, "")
 
@@ -709,14 +708,13 @@ Antworte NUR mit JSON:
     def get_active_watchlist(self, market_status: str) -> list[str]:
         """
         Kombiniert Basis-Watchlist (.env) mit Gemini Vorschlaegen.
-        'closed' (Wochenende): nur Crypto.
-        'overnight': Aktien (24/5) + Crypto — volles Universum.
-        'open' + 'extended': Aktien + Crypto — volles Universum.
+        'closed' (Nacht/Wochenende): nur Crypto (Aktien-Extended nur 4:00–20:00 ET).
+        'open' + 'extended': Aktien + Crypto.
         Erkennt Markt-Schluss-Übergang und triggert Tagesende-Auswertung.
         """
-        # Tagesende-Erkennung: open/extended → overnight/closed
+        # Tagesende-Erkennung: open/extended → closed
         if (self._last_market_status in ("open", "extended")
-                and market_status in ("overnight", "closed")):
+                and market_status == "closed"):
             logger.info("[WATCHLIST EOD] Markt geschlossen — starte Tagesende-Auswertung")
             self.evaluate_end_of_day()
         self._last_market_status = market_status
@@ -724,12 +722,12 @@ Antworte NUR mit JSON:
         dynamic = self.discover(market_status)
 
         if market_status == "closed":
-            # Wochenende: nur Crypto handelbar
+            # Nacht/Wochenende: nur Crypto handelbar (Alpaca Individual: kein 24h-Aktienhandel)
             crypto = [s for s in (Config.WATCHLIST + dynamic)
                       if any(s.endswith(x) for x in ("USD", "BTC", "ETH", "SOL"))]
             return list(dict.fromkeys(crypto))[:10]
 
-        # open + extended + overnight: volles Universum (Aktien 24/5 + Crypto)
+        # open + extended: volles Universum
         combined = list(dict.fromkeys(Config.WATCHLIST + dynamic))
         return combined[:25]
 
@@ -1833,9 +1831,9 @@ class Engine:
 
         active_watchlist = self.watchlist.get_active_watchlist(market_status)
 
-        # Spike-Sensor: breiter Markt (nur wenn Markt offen/extended/overnight)
+        # Spike-Sensor: breiter Markt (nur wenn Markt offen/extended)
         spike_symbols: list[str] = []
-        if market_status in ("open", "extended", "overnight"):
+        if market_status in ("open", "extended"):
             spike_symbols = self.spike_sensor.scan()
             # Spike-Symbole zur Watchlist hinzufügen (keine Duplikate)
             extra = [s for s in spike_symbols if s not in active_watchlist]
@@ -1847,9 +1845,8 @@ class Engine:
         logger.info(f"  SCAN @ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         status_labels = {
             "open": "REGULÄR 9:30–16:00",
-            "extended": "VOR-/NACHBÖRSE",
-            "overnight": "OVERNIGHT 20:00–04:00 (Aktien 24/5 + Crypto)",
-            "closed": "WOCHENENDE (nur Crypto)",
+            "extended": "VOR-/NACHBÖRSE 4:00–9:30 / 16:00–20:00",
+            "closed": "GESCHLOSSEN (nur Crypto)",
         }
         logger.info(f"  Markt: {status_labels.get(market_status, market_status)}")
         logger.info(f"  Watchlist ({len(active_watchlist)}): {', '.join(active_watchlist)}")
