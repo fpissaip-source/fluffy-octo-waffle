@@ -42,10 +42,12 @@ logging.getLogger().addHandler(_log_handler)
 
 def _check_gemini(api_key: str) -> dict:
     try:
-        import google.generativeai as genai
-        genai.configure(api_key=api_key)
-        m = genai.GenerativeModel("gemini-2.5-flash")
-        m.generate_content("ping", generation_config={"max_output_tokens": 5})
+        from google import genai
+        client = genai.Client(api_key=api_key)
+        client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents="ping",
+        )
         return {"ok": True, "msg": "Verbunden"}
     except Exception as e:
         return {"ok": False, "msg": str(e)[:80]}
