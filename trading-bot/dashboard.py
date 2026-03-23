@@ -30,7 +30,7 @@ _LOG_BUFFER: collections.deque = collections.deque(maxlen=200)
 class _DashboardLogHandler(logging.Handler):
     def emit(self, record):
         _LOG_BUFFER.append({
-            "ts": self.formatTime(record, "%H:%M:%S"),
+            "ts": datetime.fromtimestamp(record.created).strftime("%H:%M:%S"),
             "lvl": record.levelname,
             "msg": record.getMessage(),
         })
