@@ -43,6 +43,9 @@ class Config:
 
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 
+    # ── Dry Run (kein echtes Order-Submission, aber Gemini + Balance aktiv) ──
+    DRY_RUN: bool = os.getenv("DRY_RUN", "false").lower() in ("1", "true", "yes")
+
     # ── Telegram ──
     TELEGRAM_TOKEN: str = os.getenv("TELEGRAM_TOKEN", "")
     TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")

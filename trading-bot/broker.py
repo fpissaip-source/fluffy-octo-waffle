@@ -269,6 +269,9 @@ class AlpacaBroker:
             return None
 
     def market_buy(self, symbol: str, qty: int) -> Optional[str]:
+        if Config.DRY_RUN:
+            logger.info(f"[DRY RUN] WÜRDE KAUFEN: {qty}x {symbol} @ MARKET")
+            return "dry-run-buy"
         try:
             status = self.get_market_status()
             is_crypto = symbol.upper() in CRYPTO_SYMBOLS
@@ -303,6 +306,9 @@ class AlpacaBroker:
             return None
 
     def market_sell(self, symbol: str, qty: int) -> Optional[str]:
+        if Config.DRY_RUN:
+            logger.info(f"[DRY RUN] WÜRDE VERKAUFEN: {qty}x {symbol} @ MARKET")
+            return "dry-run-sell"
         try:
             crypto = symbol.upper().endswith("USD") and not symbol.upper().endswith("BUSD")
             tif = "gtc" if crypto else "day"
@@ -316,6 +322,9 @@ class AlpacaBroker:
             return None
 
     def limit_buy(self, symbol: str, qty: int, limit_price: float) -> Optional[str]:
+        if Config.DRY_RUN:
+            logger.info(f"[DRY RUN] WÜRDE KAUFEN: {qty}x {symbol} @ LIMIT ${limit_price:.2f}")
+            return "dry-run-limit-buy"
         try:
             order = self.api.submit_order(
                 symbol=symbol, qty=qty, side="buy",
@@ -329,6 +338,9 @@ class AlpacaBroker:
             return None
 
     def close_position(self, symbol: str) -> Optional[str]:
+        if Config.DRY_RUN:
+            logger.info(f"[DRY RUN] WÜRDE POSITION SCHLIEßEN: {symbol}")
+            return "dry-run-close"
         try:
             market_status = self.get_market_status()
             crypto = symbol.upper().endswith("USD") and not symbol.upper().endswith("BUSD")
@@ -380,6 +392,9 @@ class AlpacaBroker:
     def place_native_stop(self, symbol: str, qty: int, stop_price: float) -> Optional[str]:
         """Platziert eine native GTC Stop-Market-Order bei Alpaca.
         Wird automatisch ausgeführt wenn der Preis fällt — auch wenn der Bot offline ist."""
+        if Config.DRY_RUN:
+            logger.info(f"[DRY RUN] WÜRDE STOP SETZEN: {symbol} {qty}x @ ${stop_price:.2f}")
+            return "dry-run-stop"
         try:
             order = self.api.submit_order(
                 symbol=symbol,

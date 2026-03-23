@@ -13,6 +13,7 @@ Zeigt:
   - Markt-Regime + Watchlist
 """
 
+import collections
 import json
 import logging
 import os
@@ -22,6 +23,21 @@ from pathlib import Path
 from threading import Thread
 
 logger = logging.getLogger("bot.dashboard")
+
+# ── Live-Log Ring-Buffer (letzte 200 Zeilen) ──
+_LOG_BUFFER: collections.deque = collections.deque(maxlen=200)
+
+class _DashboardLogHandler(logging.Handler):
+    def emit(self, record):
+        _LOG_BUFFER.append({
+            "ts": self.formatTime(record, "%H:%M:%S"),
+            "lvl": record.levelname,
+            "msg": record.getMessage(),
+        })
+
+_log_handler = _DashboardLogHandler()
+_log_handler.setLevel(logging.DEBUG)
+logging.getLogger().addHandler(_log_handler)
 
 
 def _check_gemini(api_key: str) -> dict:
@@ -40,6 +56,7 @@ def get_dashboard_data() -> dict:
     data: dict = {
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "mode": "PAPER" if Config.is_paper() else "LIVE",
+        "dry_run": Config.DRY_RUN,
         "api_alpaca": {"ok": False, "msg": ""},
         "api_gemini": {"ok": False, "msg": ""},
         "equity": 0.0,
@@ -155,6 +172,11 @@ tr:hover td{background:#0f0f0f}
 .badge-paper{background:#0a2a0a;color:#00ff88;border:1px solid #00ff8830}
 .badge-live{background:#2a0a0a;color:#ff4444;border:1px solid #ff444430}
 .badge-regime{background:#0a1a2a;color:#00aaff;border:1px solid #00aaff30}
+.badge-dryrun{background:#2a1a00;color:#ffaa00;border:1px solid #ffaa0040}
+/* Live Log */
+#log-box{background:#060606;border:1px solid #1a1a1a;border-radius:8px;padding:10px 14px;height:220px;overflow-y:auto;font-size:.72em;line-height:1.6em}
+.log-INFO{color:#555}.log-WARNING{color:#ffaa00}.log-ERROR{color:#ff4444}.log-DEBUG{color:#333}
+.log-line .lts{color:#333;margin-right:6px}.log-line .lmsg{}.log-line.dry{color:#ffaa00}
 .no-data{color:#333;padding:14px 10px;font-style:italic;font-size:.82em}
 /* Stats row */
 .stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin-bottom:6px}
@@ -175,6 +197,7 @@ tr:hover td{background:#0f0f0f}
   TRADING BOT
   <span class="badge badge-paper" id="mode-badge">PAPER</span>
   <span class="badge badge-regime" id="regime-badge" style="display:none">—</span>
+  <span class="badge badge-dryrun" id="dryrun-badge" style="display:none">DRY RUN</span>
 </h1>
 
 <!-- API Status -->
@@ -231,6 +254,10 @@ tr:hover td{background:#0f0f0f}
 <p id="watchlist" style="color:#555;font-size:.8em;line-height:1.8em">—</p>
 <p class="bl" id="blacklist"></p>
 
+<!-- Live Log -->
+<h2>Live Log</h2>
+<div id="log-box"><span style="color:#333">Lade...</span></div>
+
 <div class="footer" id="footer">Auto-Refresh alle 15s</div>
 
 <script>
@@ -258,6 +285,10 @@ async function refresh() {
     rb.textContent = d.regime;
     rb.style.display = 'inline-block';
   }
+
+  // Dry Run Badge
+  const drb = document.getElementById('dryrun-badge');
+  drb.style.display = d.dry_run ? 'inline-block' : 'none';
 
   // API Badges
   const alpacaEl = document.getElementById('alpaca-status');
@@ -364,8 +395,29 @@ async function refresh() {
   document.getElementById('footer').textContent = 'Auto-Refresh alle 15s  |  Letztes Update: ' + d.timestamp;
 }
 
+async function refreshLog() {
+  try {
+    const lines = await (await fetch('/api/log')).json();
+    const box = document.getElementById('log-box');
+    const atBottom = box.scrollHeight - box.scrollTop <= box.clientHeight + 40;
+    const lvlColors = {INFO:'#555',WARNING:'#ffaa00',ERROR:'#ff4444',DEBUG:'#333'};
+    box.innerHTML = lines.slice(-100).map(l => {
+      const isDry = l.msg && l.msg.includes('[DRY RUN]');
+      const color = isDry ? '#ffaa00' : (lvlColors[l.lvl] || '#555');
+      return `<div class="log-line"><span class="lts">${l.ts}</span><span style="color:${color}">${escHtml(l.msg)}</span></div>`;
+    }).join('');
+    if (atBottom) box.scrollTop = box.scrollHeight;
+  } catch(e) {}
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
 refresh();
+refreshLog();
 setInterval(refresh, 15000);
+setInterval(refreshLog, 3000);
 </script>
 </body>
 </html>"""
@@ -373,7 +425,14 @@ setInterval(refresh, 15000);
 
 class DashboardHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path == "/api/data":
+        if self.path == "/api/log":
+            body = json.dumps(list(_LOG_BUFFER)).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(body)
+        elif self.path == "/api/data":
             try:
                 data = get_dashboard_data()
                 body = json.dumps(data, default=str).encode()
