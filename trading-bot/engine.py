@@ -1599,12 +1599,19 @@ class Engine:
             self._signal_notified.pop(signal.symbol, None)
 
             # ── Nativer Broker Stop-Loss + Take-Profit (sofortige Ausführung bei Alpaca, auch offline) ──
-            if signal.atr > 0:
+            # Crypto: Alpaca unterstützt keine Stop-Orders für Crypto → überspringen
+            from broker import CRYPTO_SYMBOLS
+            is_crypto = signal.symbol.upper() in CRYPTO_SYMBOLS
+            if signal.atr > 0 and not is_crypto:
                 stops = self.risk.compute_stops(price, signal.atr)
                 stop_price = stops["stop_loss"]
                 tp_price = stops["take_profit"]
 
-                stop_order_id = self.broker.place_native_stop(signal.symbol, signal.qty, stop_price)
+                # Tatsächliche gefüllte Qty von Alpaca holen (verhindert Rundungsfehler bei Crypto/Fractional)
+                actual_pos = self.broker.get_positions().get(signal.symbol, {})
+                actual_qty = actual_pos.get("qty", signal.qty)
+
+                stop_order_id = self.broker.place_native_stop(signal.symbol, actual_qty, stop_price)
                 if stop_order_id:
                     self._native_stop_orders[signal.symbol] = stop_order_id
                     logger.info(
@@ -1612,7 +1619,7 @@ class Engine:
                         f"({stops['stop_loss_pct']}) hinterlegt"
                     )
 
-                tp_order_id = self.broker.place_native_tp(signal.symbol, signal.qty, tp_price)
+                tp_order_id = self.broker.place_native_tp(signal.symbol, actual_qty, tp_price)
                 if tp_order_id:
                     self._native_tp_orders[signal.symbol] = tp_order_id
                     logger.info(
