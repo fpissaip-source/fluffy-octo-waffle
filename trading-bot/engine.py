@@ -63,10 +63,10 @@ class ReasoningLayer:
     def _cascade_fallback(self, symbol: str, cascade_level: int, reason: str) -> dict:
         """
         Fallback wenn Gemini nicht antwortet (Timeout / API-Fehler).
-        6/7 oder 7/7 → Auto-Approve (starkes Signal auch ohne LLM).
-        4/7 oder 5/7 → Blockiert (zu schwach fuer Blind-Trade).
+        4/7+ → Auto-Approve (Express Lane, starkes Signal auch ohne LLM).
+        3/7 → Blockiert (zu schwach fuer Blind-Trade).
         """
-        if cascade_level >= 6:
+        if cascade_level >= 4:
             logger.warning(
                 f"[REASONING] {symbol}: {reason} → AUTO-APPROVE "
                 f"wegen Kaskade {cascade_level}/7"
@@ -779,6 +779,9 @@ class TradeSignal:
         elif passed_count >= 4:
             self.cascade_level = 4
             self.cascade_label = "MINIMAL (4/7) — Schwaches Signal"
+        elif passed_count >= 3:
+            self.cascade_level = 3
+            self.cascade_label = "SCHWACH (3/7) — Gemini entscheidet"
         else:
             self.all_passed = False
             self.action = "HOLD"
@@ -787,7 +790,7 @@ class TradeSignal:
             self.reason = f"Zu schwach: nur {passed_count}/{total} — Gemini nicht befragt. Failed: {', '.join(failed)}"
             return
 
-        # Ab 4/7 + Kelly ✓ → Gemini entscheidet
+        # Ab 3/7 + Kelly ✓ → Gemini entscheidet
         self.all_passed = True
         self.action = "BUY"
         failed = [n for n, r in self.results.items() if not r["passed"]]
@@ -805,7 +808,7 @@ class TradeSignal:
             lines.append(f"  {name:<16} {status:<8} signal={r['signal']}")
         lines.append(f"{'-' * 60}")
         if self.all_passed:
-            if self.cascade_level >= 5:
+            if self.cascade_level >= 4:
                 lines.append(f"  LAYER 2: REASONING  -> Express Lane ({self.cascade_level}/7) — kein Gemini-Block")
                 lines.append(f"  LAYER 3: EXECUTION  -> Qty: {self.qty}")
             else:
@@ -1450,14 +1453,16 @@ class Engine:
             return None
 
         # ── SCHICHT 2: Reasoning Layer ──
-        # EXPRESS LANE: ab 5/7 → sofort handeln, Gemini prüft async ob HALTEN oder VERKAUFEN
-        if signal.cascade_level >= 5:
+        # EXPRESS LANE: ab 4/7 → sofort handeln, Gemini prüft async ob HALTEN oder VERKAUFEN
+        if signal.cascade_level >= 4:
             if signal.cascade_level >= 7:
                 express_confidence, express_prob = 0.85, 85
             elif signal.cascade_level >= 6:
                 express_confidence, express_prob = 0.75, 75
-            else:  # 5/7
+            elif signal.cascade_level >= 5:
                 express_confidence, express_prob = 0.65, 65
+            else:  # 4/7
+                express_confidence, express_prob = 0.55, 55
             reasoning = {
                 "approved": True,
                 "confidence": express_confidence,
@@ -1473,7 +1478,7 @@ class Engine:
                 f"Sofort-Execution, Gemini-Veto läuft im Hintergrund"
             )
         else:
-            # 4/7 → normaler Gemini-Check (blockierend, kein Sofort-Trade)
+            # 3/7 → normaler Gemini-Check (blockierend, kein Sofort-Trade)
             reasoning = self.reasoning.approve_trade(
                 symbol=signal.symbol,
                 signal=signal,
