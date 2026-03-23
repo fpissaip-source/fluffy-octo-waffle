@@ -367,26 +367,35 @@ class SentimentEngine:
         gemini_result = self.gemini.analyze(articles, symbol)
 
         # ── Kombination ──
-        # Gewichtung: Symbol-News 50%, Makro 30%, Gemini 20%
-        combined = symbol_sentiment["score"] * 0.50 + macro_sentiment["score"] * 0.30
-        if gemini_result and "score" in gemini_result:
-            combined += gemini_result["score"] * 0.20
+        # Wenn Artikel vorhanden: Symbol 50%, Makro 30%, Gemini 20%
+        # Ohne Artikel: Gemini 100%
+        has_articles = symbol_sentiment["article_count"] > 0 or macro_sentiment["article_count"] > 0
+        if has_articles:
+            combined = symbol_sentiment["score"] * 0.50 + macro_sentiment["score"] * 0.30
+            if gemini_result and "score" in gemini_result:
+                combined += gemini_result["score"] * 0.20
+            else:
+                combined += symbol_sentiment["score"] * 0.20
         else:
-            combined += symbol_sentiment["score"] * 0.20
+            # Nur Gemini
+            combined = gemini_result["score"] if gemini_result and "score" in gemini_result else 0.0
 
         # Confidence basierend auf Datenqualitaet
-        confidence = 0.3  # Baseline
-        if symbol_sentiment["article_count"] > 3:
-            confidence += 0.2
-        if symbol_sentiment["article_count"] > 10:
-            confidence += 0.1
-        if macro_sentiment["article_count"] > 3:
-            confidence += 0.1
-        if gemini_result:
-            confidence += 0.2
-            # Klarer Trend = höhere Confidence
-            if gemini_result.get("trend") in ("improving", "worsening"):
+        if has_articles:
+            confidence = 0.3
+            if symbol_sentiment["article_count"] > 3:
+                confidence += 0.2
+            if symbol_sentiment["article_count"] > 10:
                 confidence += 0.1
+            if macro_sentiment["article_count"] > 3:
+                confidence += 0.1
+            if gemini_result:
+                confidence += 0.2
+                if gemini_result.get("trend") in ("improving", "worsening"):
+                    confidence += 0.1
+        else:
+            # Gemini-only: Confidence direkt aus Gemini-Response
+            confidence = gemini_result.get("confidence", 0.4) if gemini_result else 0.1
         confidence = min(confidence, 1.0)
 
         result = {
