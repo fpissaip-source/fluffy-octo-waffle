@@ -856,6 +856,8 @@ class Engine:
         self._SIGNAL_COOLDOWN = 300  # 5 Minuten Cooldown pro Symbol
         # Native Stop-Loss Orders: symbol -> order_id (bei Alpaca hinterlegt)
         self._native_stop_orders: dict[str, str] = {}
+        # Native Take-Profit Orders: symbol -> order_id (bei Alpaca hinterlegt)
+        self._native_tp_orders: dict[str, str] = {}
         # Exit-Notification Deduplication: verhindert mehrfache Telegram-Exits
         self._exit_notified: dict[str, float] = {}  # symbol -> timestamp
         self._EXIT_NOTIFY_COOLDOWN = 120  # 2 Minuten Cooldown pro Symbol
@@ -880,6 +882,16 @@ class Engine:
             else:
                 logger.warning(f"[NATIVE STOP] {symbol}: Stop-Order {order_id} konnte nicht storniert werden (bereits gefüllt?)")
 
+    def _cancel_native_tp(self, symbol: str):
+        """Storniert die native Alpaca Take-Profit-Order für ein Symbol (vor manuellem Close)."""
+        order_id = self._native_tp_orders.pop(symbol, None)
+        if order_id:
+            cancelled = self.broker.cancel_order(order_id)
+            if cancelled:
+                logger.info(f"[NATIVE TP] {symbol}: TP-Order {order_id} storniert")
+            else:
+                logger.warning(f"[NATIVE TP] {symbol}: TP-Order {order_id} konnte nicht storniert werden (bereits gefüllt?)")
+
     def _close_with_protection(self, symbol: str) -> bool:
         """Close mit Doppel-Close Schutz. Gibt True zurueck wenn Order abgesetzt."""
         with self._order_lock:
@@ -888,6 +900,7 @@ class Engine:
             self._closing_positions.add(symbol)
             self._close_order_ts[symbol] = time.time()
         self._cancel_native_stop(symbol)
+        self._cancel_native_tp(symbol)
         self.broker.close_position(symbol)
         self.position_highs.pop(symbol, None)
         return True
@@ -1179,6 +1192,7 @@ class Engine:
                     if self.broker.has_position(signal.symbol):
                         exit_price = self.broker.get_latest_price(signal.symbol) or entry_price
                         self._cancel_native_stop(signal.symbol)
+                        self._cancel_native_tp(signal.symbol)
                         self.broker.close_position(signal.symbol)
                         self.position_highs.pop(signal.symbol, None)
                         self.learner.record_exit(
@@ -1582,10 +1596,12 @@ class Engine:
             # Cooldown nach erfolgreicher Order zurücksetzen (nächster Trade soll wieder notifiziert werden)
             self._signal_notified.pop(signal.symbol, None)
 
-            # ── Nativer Broker Stop-Loss (sofortige Ausführung bei Alpaca, auch offline) ──
+            # ── Nativer Broker Stop-Loss + Take-Profit (sofortige Ausführung bei Alpaca, auch offline) ──
             if signal.atr > 0:
                 stops = self.risk.compute_stops(price, signal.atr)
                 stop_price = stops["stop_loss"]
+                tp_price = stops["take_profit"]
+
                 stop_order_id = self.broker.place_native_stop(signal.symbol, signal.qty, stop_price)
                 if stop_order_id:
                     self._native_stop_orders[signal.symbol] = stop_order_id
@@ -1593,10 +1609,21 @@ class Engine:
                         f"[NATIVE STOP] {signal.symbol}: Stop @ ${stop_price:.2f} "
                         f"({stops['stop_loss_pct']}) hinterlegt"
                     )
+
+                tp_order_id = self.broker.place_native_tp(signal.symbol, signal.qty, tp_price)
+                if tp_order_id:
+                    self._native_tp_orders[signal.symbol] = tp_order_id
+                    logger.info(
+                        f"[NATIVE TP] {signal.symbol}: TP @ ${tp_price:.2f} "
+                        f"({stops['take_profit_pct']}) hinterlegt"
+                    )
+
+                if stop_order_id or tp_order_id:
                     self._tg(
-                        f"🛡 <b>Stop-Loss hinterlegt</b> — {signal.symbol}\n"
+                        f"🛡 <b>Stop-Loss & Take-Profit hinterlegt</b> — {signal.symbol}\n"
                         f"Stop: ${stop_price:.2f} ({stops['stop_loss_pct']})\n"
-                        f"<i>Wird direkt von Alpaca ausgeführt (auch wenn Bot offline)</i>"
+                        f"TP:   ${tp_price:.2f} ({stops['take_profit_pct']})  |  R/R: {stops['risk_reward']}x\n"
+                        f"<i>Werden direkt von Alpaca ausgeführt (auch wenn Bot offline)</i>"
                     )
 
             # ── ORDER PLACED Telegram Alert ──
@@ -1773,6 +1800,7 @@ class Engine:
                         self._closing_positions.add(symbol)
 
                     self._cancel_native_stop(symbol)
+                    self._cancel_native_tp(symbol)
                     self.broker.close_position(symbol)
 
                     pl_icon = "🟢" if plpc >= 0 else "🔴"

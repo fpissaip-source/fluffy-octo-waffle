@@ -416,6 +416,27 @@ class AlpacaBroker:
             logger.error(f"Native stop failed {symbol}: {e}")
             return None
 
+    def place_native_tp(self, symbol: str, qty: float, tp_price: float) -> Optional[str]:
+        """Platziert eine native GTC Limit-Sell-Order bei Alpaca (Take-Profit).
+        Wird automatisch ausgeführt wenn der Preis steigt — auch wenn der Bot offline ist."""
+        if Config.DRY_RUN:
+            logger.info(f"[DRY RUN] WÜRDE TP SETZEN: {symbol} {qty}x @ ${tp_price:.2f}")
+            return "dry-run-tp"
+        try:
+            order = self.api.submit_order(
+                symbol=symbol,
+                qty=qty,
+                side="sell",
+                type="limit",
+                time_in_force="gtc",
+                limit_price=round(tp_price, 2),
+            )
+            logger.info(f"NATIVE TP {symbol} {qty}x @ ${tp_price:.2f} -> Order {order.id}")
+            return order.id
+        except Exception as e:
+            logger.error(f"Native TP failed {symbol}: {e}")
+            return None
+
     def cancel_order(self, order_id: str) -> bool:
         """Storniert eine spezifische Order per ID."""
         try:
