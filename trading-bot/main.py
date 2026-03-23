@@ -138,7 +138,7 @@ def main():
         cmd_backtest()
     else:
         import threading
-        from api import start_api_server
+        from dashboard import start_background as start_dashboard
 
         telegram_configured = (
             Config.TELEGRAM_TOKEN
@@ -158,7 +158,7 @@ def main():
             def _engine_thread():
                 try:
                     eng = Engine()
-                    start_api_server(broker=eng.broker, port=int(os.getenv("BOT_API_PORT", "5001")))
+                    start_dashboard(port=int(os.getenv("BOT_API_PORT", "5001")))
                     eng.notify = bot.send_sync
                     bot.engine = eng
                     bot.is_running = True
@@ -177,7 +177,7 @@ def main():
             sys.exit(1)
         else:
             engine = Engine()
-            start_api_server(broker=engine.broker, port=int(os.getenv("BOT_API_PORT", "5001")))
+            start_dashboard(port=int(os.getenv("BOT_API_PORT", "5001")))
             engine.run()
 
 
