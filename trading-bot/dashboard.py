@@ -60,6 +60,42 @@ def _check_gemini(api_key: str) -> dict:
         return {"ok": False, "msg": str(e)[:80]}
 
 
+def _load_autopsy_per_symbol() -> dict:
+    """Lädt die neueste Autopsy-JSON pro Symbol aus dem autopsy/-Verzeichnis."""
+    from pathlib import Path
+    autopsy_dir = Path(__file__).parent / "autopsy"
+    result = {}
+    if not autopsy_dir.exists():
+        return result
+    try:
+        files = sorted(autopsy_dir.glob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True)
+        for f in files:
+            try:
+                import json as _json
+                with open(f) as fh:
+                    data = _json.load(fh)
+                sym = data.get("symbol", "")
+                if sym and sym not in result:
+                    result[sym] = {
+                        "reason": data.get("gemini_reason", ""),
+                        "probability_pct": data.get("gemini_probability_pct"),
+                        "confidence": data.get("gemini_confidence"),
+                        "risk_factors": data.get("gemini_risk_factors", []),
+                        "cascade_level": data.get("cascade_level"),
+                        "regime": data.get("regime", ""),
+                        "timestamp": data.get("timestamp", ""),
+                        "filters": {
+                            name: {"passed": v.get("passed"), "signal": v.get("signal")}
+                            for name, v in (data.get("formula_results") or {}).items()
+                        },
+                    }
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return result
+
+
 def get_dashboard_data() -> dict:
     from config import Config
     data: dict = {
@@ -80,6 +116,7 @@ def get_dashboard_data() -> dict:
         "watchlist": Config.WATCHLIST,
         "regime": "UNKNOWN",
         "blacklist": [],
+        "autopsy": {},
     }
 
     # ── Alpaca API Check ──
