@@ -95,7 +95,8 @@ class TradingTelegramBot:
             "/resume      — Bot fortsetzen\n"
             "/stop        — Auto-Scan stoppen\n"
             "/closeall    — Alle Positionen schliessen (15min Sperre)\n"
-            "/cancelbuy   — Alle offenen BUY-Orders canceln\n\n"
+            "/cancelbuy   — Alle offenen BUY-Orders canceln\n"
+            "/kill        — ALLES stoppen + Prozess beenden\n\n"
             "<b>💾 Kandidaten-Queue:</b>\n"
             "/queue       — Wartende Signale anzeigen (kein Cash)\n\n"
             "<b>📈 Analyse:</b>\n"
@@ -340,6 +341,80 @@ class TradingTelegramBot:
             await update.message.reply_text(text.strip())
         except Exception as e:
             await update.message.reply_text(f"Error: {e}")
+
+    async def cmd_kill(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """KILL: Auto-Scan stoppen + alle Orders/Positionen schliessen + Prozess beenden."""
+        import os
+        import signal
+        import time as _t
+
+        await update.message.reply_text(
+            "💀 <b>KILL-BEFEHL empfangen</b>\n"
+            "Stoppe Bot + schliesse alle Positionen + beende Prozess...",
+            parse_mode="HTML",
+        )
+
+        # 1. Auto-Scan stoppen
+        self.is_running = False
+        self.is_paused = False
+
+        broker = AlpacaBroker()
+
+        # 2. Alle offenen Orders canceln
+        try:
+            broker.api.cancel_all_orders()
+            _t.sleep(1)
+        except Exception as e:
+            await update.message.reply_text(f"⚠️ Orders cancel: {e}")
+
+        # 3. Alle Positionen schliessen
+        positions = broker.get_positions()
+        closed = []
+        failed = []
+        for sym in list(positions.keys()):
+            order_id = broker.close_position(sym)
+            if order_id:
+                closed.append(sym)
+            else:
+                failed.append(sym)
+
+        summary = ""
+        if closed:
+            summary += f"✅ Geschlossen: {', '.join(closed)}\n"
+        if failed:
+            summary += f"❌ Fehler (manuell schliessen): {', '.join(failed)}\n"
+        if not positions:
+            summary = "Keine offenen Positionen.\n"
+
+        await update.message.reply_text(summary.strip() or "Keine Positionen.")
+
+        # 4. Prozess beenden
+        _LOCK_FILE = "/tmp/trading_bot.pid"
+        pid_killed = False
+        if os.path.exists(_LOCK_FILE):
+            try:
+                with open(_LOCK_FILE) as f:
+                    pid = int(f.read().strip())
+                os.kill(pid, signal.SIGTERM)
+                _t.sleep(2)
+                try:
+                    os.kill(pid, 0)
+                    os.kill(pid, signal.SIGKILL)
+                    await update.message.reply_text(f"☠️ Prozess {pid} mit SIGKILL beendet.")
+                except ProcessLookupError:
+                    await update.message.reply_text(f"✅ Prozess {pid} beendet.")
+                try:
+                    os.remove(_LOCK_FILE)
+                except FileNotFoundError:
+                    pass
+                pid_killed = True
+            except Exception as e:
+                await update.message.reply_text(f"⚠️ PID-Fehler: {e}")
+
+        if not pid_killed:
+            await update.message.reply_text("ℹ️ Kein laufender Bot-Prozess gefunden (keine PID-Datei).")
+
+        await update.message.reply_text("🔴 <b>Bot vollständig beendet.</b>", parse_mode="HTML")
 
     async def cmd_cancelbuy(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Cancelt alle offenen BUY-Orders (keine Positionen, nur pending orders)."""
@@ -973,6 +1048,7 @@ Antworte NUR mit JSON:
         self.app.add_handler(CommandHandler("orders", self.cmd_orders))
         self.app.add_handler(CommandHandler("cancelbuy", self.cmd_cancelbuy))
         self.app.add_handler(CommandHandler("queue", self.cmd_queue))
+        self.app.add_handler(CommandHandler("kill", self.cmd_kill))
 
         logger.info("Telegram bot running. Send /start to begin.")
         self.app.run_polling(drop_pending_updates=True)
