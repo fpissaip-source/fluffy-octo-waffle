@@ -16,7 +16,7 @@ import argparse
 
 from config import Config
 from engine import Engine
-from broker import AlpacaBroker
+from broker_binance import BinanceBroker
 
 _LOCK_FILE = "/tmp/trading_bot.pid"
 
@@ -55,18 +55,18 @@ def setup_logging():
 
 
 def cmd_status():
-    broker = AlpacaBroker()
+    broker = BinanceBroker()
     equity = broker.get_equity()
     cash = broker.get_cash()
     bp = broker.get_buying_power()
     positions = broker.get_positions()
 
     print(f"\n{'=' * 50}")
-    print(f"  ACCOUNT STATUS  ({'PAPER' if Config.is_paper() else 'LIVE'})")
+    print(f"  ACCOUNT STATUS  ({'TESTNET' if Config.is_paper() else 'LIVE'}) — Binance Crypto")
     print(f"{'=' * 50}")
-    print(f"  Equity:        ${equity:,.2f}")
-    print(f"  Cash:          ${cash:,.2f}")
-    print(f"  Buying Power:  ${bp:,.2f}")
+    print(f"  Equity:        ${equity:,.2f} USDT")
+    print(f"  Cash:          ${cash:,.2f} USDT")
+    print(f"  Buying Power:  ${bp:,.2f} USDT")
     print(f"  Positions:     {len(positions)}")
     print(f"{'-' * 50}")
     if positions:
@@ -74,7 +74,7 @@ def cmd_status():
             pl = pos['unrealized_pl']
             plpc = pos['unrealized_plpc']
             pre = "+" if pl >= 0 else ""
-            print(f"  {sym:<8} {pos['qty']:>6} shares @ ${pos['avg_entry']:.2f}"
+            print(f"  {sym:<12} {pos['qty']:>12.6f} @ ${pos['avg_entry']:.4f}"
                   f"  {pre}${pl:.2f} ({pre}{plpc:.1%})")
     else:
         print("  No open positions.")
@@ -133,7 +133,7 @@ def main():
         cmd_status()
     elif args.scan_once:
         e = Engine()
-        Engine().scan_once(market_open=e.broker.is_market_open())
+        e.scan_once(market_status="open")
     elif args.backtest:
         cmd_backtest()
     else:

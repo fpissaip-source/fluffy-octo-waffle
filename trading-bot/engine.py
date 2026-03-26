@@ -2,12 +2,12 @@
 engine.py — Drei-Schichten-Architektur:
   Schicht 1 (Perception):  7 quantitative Formeln scannen den Markt
   Schicht 2 (Reasoning):   Gemini entscheidet PFLICHTWEISE vor jeder Order
-  Schicht 3 (Execution):   Alpaca fuehrt Order aus
+  Schicht 3 (Execution):   Binance fuehrt Order aus (24/7 Crypto)
 
-24/7 Modus:
-  - Marktzeiten: alle Symbole (Aktien + Crypto)
-  - Nachts/Wochenende: nur Crypto (BTC, ETH, SOL etc.)
-  - Extended Hours: Aktien mit extended_hours=True
+Express Lane (4/7+):
+  - Sofortige Ausführung ohne Gemini-Block (keine Latenz)
+  - Gemini prüft NACHHER async ob HOLD/SELL sinnvoll wäre
+  - Post-Trade Autopsy läuft immer im Hintergrund (Lernfeedback)
 """
 
 import json
@@ -18,20 +18,20 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Optional
 
-# Crypto-Symbole handeln 24/7
-CRYPTO_SYMBOLS = {"BTCUSD", "ETHUSD", "SOLUSD", "AVAXUSD", "LINKUSD"}
+# Alle Symbole sind Crypto (Binance USDT-Paare)
+CRYPTO_SYMBOLS: set[str] = set()  # Wird zur Laufzeit aus Config befüllt
 
 def is_crypto(symbol: str) -> bool:
-    return symbol.upper() in CRYPTO_SYMBOLS
+    return True  # Binance: alles Crypto
 
-from broker import AlpacaBroker
+from broker_binance import BinanceBroker
 from config import Config
 from risk_manager import RiskManager, compute_atr
 from adaptive import AdaptiveLearner
 from formulas import momentum, kelly, ev_gap, kl_divergence, bayesian, stoikov
 from formulas import sentiment as sentiment_formula
 from market_context import MarketContext
-from screener import SpikeSensor
+from screener_binance import BinanceSpikeSensor
 
 logger = logging.getLogger("bot.engine")
 
@@ -466,35 +466,23 @@ class WatchlistDiscovery:
 
     def _get_top_candidates(self, market_status: str) -> list[str]:
         """
-        Holt Top-50 handelbare Kandidaten direkt via Alpaca-Batch-Snapshots.
+        Holt Top-50 Crypto-Kandidaten via Binance Batch-Snapshots (24h Ticker).
         Sortiert nach pct_move * volume (kombinierter Momentum-Score).
-        Kein Halluzinieren: Nur Ticker die WIRKLICH handeln kommen durch.
         """
         if not self.broker:
             return []
 
-        if market_status == "closed":
-            from engine import CRYPTO_SYMBOLS
-            return list(CRYPTO_SYMBOLS)
-
         try:
-            from screener import SpikeSensor
-            universe = SpikeSensor.UNIVERSE
+            from screener_binance import BinanceSpikeSensor
+            universe = BinanceSpikeSensor.UNIVERSE
             snaps = self.broker.get_snapshots_batch(universe)
 
             candidates = []
             for symbol, snap in snaps.items():
                 try:
-                    # daily_bar ist bei Extended Hours / frühem Pre-Market oft None oder volume=0
-                    # → prev_daily_bar als Fallback damit nicht alle Kandidaten wegfallen
-                    daily = snap.daily_bar
-                    if not daily or int(daily.volume) == 0:
-                        daily = getattr(snap, "prev_daily_bar", None)
-                    if not daily:
-                        continue
-                    open_p = float(daily.open)
-                    close_p = float(daily.close)
-                    volume = int(daily.volume)
+                    open_p = snap.get("open", 0)
+                    close_p = snap.get("close", 0)
+                    volume = snap.get("volume", 0)
                     if open_p <= 0 or close_p <= 0 or volume == 0:
                         continue
                     pct_move = abs((close_p - open_p) / open_p)
@@ -505,7 +493,7 @@ class WatchlistDiscovery:
             # Kombinierter Score: relative Bewegung * Volumen
             candidates.sort(key=lambda x: x[1] * x[2], reverse=True)
             top50 = [s for s, _, _ in candidates[:50]]
-            logger.info(f"[WATCHLIST] Alpaca Top-50 nach Momentum×Vol: {top50[:10]}...")
+            logger.info(f"[WATCHLIST] Binance Top-50 nach Momentum×Vol: {top50[:10]}...")
             return top50
 
         except Exception as e:
@@ -523,7 +511,7 @@ class WatchlistDiscovery:
                 if snap and snap.get("volume", 0) > 0:
                     verified.append(sym)
                 else:
-                    logger.warning(f"[WATCHLIST] {sym} verworfen: kein Volumen auf Alpaca")
+                    logger.warning(f"[WATCHLIST] {sym} verworfen: kein Volumen auf Binance")
             except Exception as e:
                 logger.warning(f"[WATCHLIST] {sym} verworfen: Snapshot fehlgeschlagen ({e})")
         return verified
@@ -553,23 +541,17 @@ class WatchlistDiscovery:
             return self.dynamic_symbols
 
         candidates_str = ", ".join(candidates[:50])
-        context_map = {
-            "open": "US Aktienmarkt ist GERADE OFFEN (9:30–16:00 ET).",
-            "extended": "US Aktienmarkt ist in VOR-/NACHBÖRSENHANDEL (4:00–9:30 / 16:00–20:00 ET).",
-            "closed": "Markt geschlossen — nur Crypto handelbar.",
-        }
-        context = context_map.get(market_status, "")
 
-        # Schritt 2: Gemini waehlt aus echten Kandidaten (kein Erfinden)
-        prompt = f"""Du bist ein erfahrener Day-Trader. {context}
+        # Schritt 2: Gemini waehlt aus echten Binance-Kandidaten (kein Erfinden)
+        prompt = f"""Du bist ein erfahrener Crypto-Trader auf Binance (24/7).
 
-Hier sind die 50 aktivsten US-Aktien der letzten Stunde nach Volumen und Kurs-Bewegung (echte Alpaca-Daten):
+Hier sind die 50 aktivsten Binance USDT-Paare nach Momentum×Volumen (24h echte Daten):
 {candidates_str}
 
-Wähle die 15 besten aus DIESER LISTE basierend auf deinem Wissen über:
-- Aktuelle News und Katalysatoren (Earnings, FDA, M&A, Short Squeeze)
-- Momentum und Trendstärke
-- Liquidität und Handelbarkeit
+Wähle die 15 besten aus DIESER LISTE basierend auf:
+- Aktuelle Crypto-News und Katalysatoren (Listings, Protokoll-Updates, Partnerships)
+- Momentum und Trendstärke (24h Bewegung)
+- Liquidität und Handelbarkeit auf Binance
 
 WICHTIG: Nur Symbole aus der obigen Liste verwenden — keine anderen erfinden.
 
@@ -632,14 +614,10 @@ Antworte NUR mit JSON:
 
     def _add_top_favorite(self):
         """
-        Fügt die beste neu entdeckte Aktie einmalig zur permanenten Watchlist hinzu.
+        Fügt das beste neu entdeckte Crypto-Symbol einmalig zur permanenten Watchlist hinzu.
         Pro Refresh-Zyklus wird maximal 1 Symbol hinzugefügt.
-        Crypto-Symbole werden übersprungen (enden auf USD/BTC/ETH/SOL).
         """
         for sym in self.dynamic_symbols:
-            # Kein Crypto, kein Duplikat
-            if any(sym.endswith(x) for x in ("USD", "BTC", "ETH", "SOL")):
-                continue
             if sym in Config.WATCHLIST:
                 continue
             Config.WATCHLIST.append(sym)
@@ -825,7 +803,7 @@ class TradeSignal:
 class Engine:
     def __init__(self):
         logger.info("Initializing engine...")
-        self.broker = AlpacaBroker()
+        self.broker = BinanceBroker()
         self.risk = RiskManager()
         self.learner = AdaptiveLearner()
         self.reasoning = ReasoningLayer()
@@ -833,7 +811,7 @@ class Engine:
         self.reasoning._learner = self.learner
         self.watchlist = WatchlistDiscovery(self.broker)
         self.watchlist.notify = self._tg   # Telegram-Callback für Favoriten-Alerts
-        self.spike_sensor = SpikeSensor(self.broker)
+        self.spike_sensor = BinanceSpikeSensor(self.broker)
         self.trade_log: list[TradeSignal] = []
         self.scan_attempts: list[dict] = []   # Alle Scan-Versuche (auch abgelehnte)
         self.position_highs: dict[str, float] = {}
@@ -877,20 +855,20 @@ class Engine:
                 logger.warning(f"Telegram notify failed: {e}")
 
     def _cancel_native_stop(self, symbol: str):
-        """Storniert den nativen Alpaca Stop-Loss für ein Symbol (vor manuellem Close)."""
+        """Storniert die native Stop-Loss-Order für ein Symbol (vor manuellem Close)."""
         order_id = self._native_stop_orders.pop(symbol, None)
         if order_id:
-            cancelled = self.broker.cancel_order(order_id)
+            cancelled = self.broker.cancel_order(order_id, symbol)
             if cancelled:
                 logger.info(f"[NATIVE STOP] {symbol}: Stop-Order {order_id} storniert")
             else:
                 logger.warning(f"[NATIVE STOP] {symbol}: Stop-Order {order_id} konnte nicht storniert werden (bereits gefüllt?)")
 
     def _cancel_native_tp(self, symbol: str):
-        """Storniert die native Alpaca Take-Profit-Order für ein Symbol (vor manuellem Close)."""
+        """Storniert die native Take-Profit-Order für ein Symbol (vor manuellem Close)."""
         order_id = self._native_tp_orders.pop(symbol, None)
         if order_id:
-            cancelled = self.broker.cancel_order(order_id)
+            cancelled = self.broker.cancel_order(order_id, symbol)
             if cancelled:
                 logger.info(f"[NATIVE TP] {symbol}: TP-Order {order_id} storniert")
             else:
@@ -948,7 +926,7 @@ class Engine:
             candidates = sorted(self._candidate_queue, key=lambda c: c["cascade_level"], reverse=True)
 
         try:
-            cash = float(self.broker.api.get_account().cash)
+            cash = self.broker.get_cash()
         except Exception:
             return
 
@@ -1015,7 +993,7 @@ class Engine:
 
         # Regime einmalig via SPY updaten
         try:
-            spy_bars = self.broker.get_bars("SPY", timeframe="5Min", limit=30)
+            spy_bars = self.broker.get_bars("BTCUSDT", timeframe="5Min", limit=30)
             if not spy_bars.empty:
                 self.risk.update_regime(spy_bars, force=True)
         except Exception:
@@ -1891,7 +1869,7 @@ class Engine:
 
         # Regime EINMAL global updaten (SPY = Marktproxy) — nicht per Symbol
         try:
-            spy_bars = self.broker.get_bars("SPY", timeframe="5Min", limit=30)
+            spy_bars = self.broker.get_bars("BTCUSDT", timeframe="5Min", limit=30)
             if not spy_bars.empty:
                 self.risk.update_regime(spy_bars)
         except Exception as e:
@@ -1899,31 +1877,23 @@ class Engine:
 
         active_watchlist = self.watchlist.get_active_watchlist(market_status)
 
-        # Spike-Sensor: breiter Markt (nur wenn Markt offen/extended)
-        spike_symbols: list[str] = []
-        if market_status in ("open", "extended"):
-            spike_symbols = self.spike_sensor.scan()
-            # Spike-Symbole zur Watchlist hinzufügen (keine Duplikate)
-            extra = [s for s in spike_symbols if s not in active_watchlist]
-            if extra:
-                logger.info(f"[SPIKE] {len(extra)} neue Symbole zur Analyse: {', '.join(extra)}")
-            active_watchlist = list(dict.fromkeys(active_watchlist + extra))
+        # Spike-Sensor: Binance 24/7 — immer scannen
+        spike_symbols: list[str] = self.spike_sensor.scan()
+        extra = [s for s in spike_symbols if s not in active_watchlist]
+        if extra:
+            logger.info(f"[SPIKE] {len(extra)} neue Crypto-Symbole zur Analyse: {', '.join(extra)}")
+        active_watchlist = list(dict.fromkeys(active_watchlist + extra))
 
         logger.info(f"\n{'=' * 60}")
         logger.info(f"  SCAN @ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        status_labels = {
-            "open": "REGULÄR 9:30–16:00",
-            "extended": "VOR-/NACHBÖRSE 4:00–9:30 / 16:00–20:00",
-            "closed": "GESCHLOSSEN (nur Crypto)",
-        }
-        logger.info(f"  Markt: {status_labels.get(market_status, market_status)}")
+        logger.info(f"  Binance Crypto — 24/7")
         logger.info(f"  Watchlist ({len(active_watchlist)}): {', '.join(active_watchlist)}")
         logger.info(f"  Regime: {self.risk.regime.value}")
         logger.info(f"{'=' * 60}")
 
         # Exit-Conditions werden vom _exit_monitor_loop Thread alle 3s geprüft
 
-        # Phase 1 — Parallel: Formel-Analyse + Alpaca-Daten für alle Symbole gleichzeitig
+        # Phase 1 — Parallel: Formel-Analyse + Binance-Daten für alle Symbole gleichzeitig
         signals: list[TradeSignal] = [None] * len(active_watchlist)
 
         def _analyze(idx_sym):
@@ -1958,10 +1928,10 @@ class Engine:
 
     def run(self):
         logger.info("=" * 60)
-        logger.info("  7 FILTERS. Gemini REASONING. 24/7.")
-        logger.info(f"  Mode: {'PAPER' if Config.is_paper() else '!! LIVE !!'}")
+        logger.info("  7 FILTERS. Gemini REASONING. Binance 24/7 Crypto.")
+        logger.info(f"  Mode: {'TESTNET (Paper)' if Config.is_paper() else '!! LIVE !!'}")
         logger.info(f"  Base Watchlist: {Config.WATCHLIST}")
-        logger.info(f"  Dynamic Discovery: alle 1h via Gemini")
+        logger.info(f"  Express Lane: 4/7+ → sofort, Gemini prüft async")
         logger.info("=" * 60)
 
         # Startup: Offene Positionen pruefen bevor der normale Scan beginnt
@@ -1978,12 +1948,7 @@ class Engine:
         try:
             while True:
                 try:
-                    market_status = self.broker.get_market_status()
-
-                    if market_status == "closed":
-                        # Wochenende: nur Crypto, aber trotzdem scannen
-                        logger.info("Wochenende — scanne nur Crypto...")
-
+                    market_status = self.broker.get_market_status()  # "open" (Binance 24/7)
                     self.scan_once(market_status)
 
                 except KeyboardInterrupt:
